@@ -3,55 +3,67 @@
 # Copyright (c) 2026 Enrico Saluzzi
 # SPDX-License-Identifier: MIT
 """
-photo-backup.py - Incremental backup of the Proton Drive Photos section.
+photo-backup.py - Incremental backup of Proton Photos: one folder per capture
+year, correct file dates, and optionally the albums.
 
 WHY
-  The Photos section is not synced by the desktop client and is not a
-  filesystem path: it only exists through the CLI's `photo` commands
-  (`photo timeline`, `photo download`). This script downloads it to a local
-  folder and remembers what it already fetched, so later runs only copy the
-  new photos.
+  The Photos section isn't synced by the desktop client and isn't a
+  filesystem path: it only exists through the CLI's `photo` and `album`
+  commands. This script keeps a local copy of it, and only fetches what's new
+  on each run.
 
-HOW IT WORKS
-  1. `photo timeline` produces the full inventory (uid, capture date and,
-     with --details, name, size and sha1). It is saved as
-     .proton-photo-inventory.json in the destination folder.
-  2. uids already downloaded are read from the state file
-     (.proton-photo-state.txt). uids no longer on Proton are dropped from it.
-  3. missing photos are downloaded in batches, to amortize the ~1.4 s startup
-     cost the CLI pays on every invocation, into one folder per year of
-     capture.
-  4. every downloaded photo is CONFIRMED BY CONTENT before being recorded:
-     the sha1 of the new files is compared with the sha1 Proton declares.
-     Counting files is not enough: with `-c rename` a file can arrive under a
-     different name, and a partly failed batch can look complete. When a
-     batch is only partly confirmed, the rest is retried one photo at a time.
+WHAT EACH RUN DOES
+  1. reads the timeline (`photo timeline -d -j`): every photo with its capture
+     date and sha1. Saved as .proton-photo-inventory.json.
+  2. with --import DIR, first adds photos you had to download by hand from the
+     web interface (typically iOS edits, "_modified"), matched by name.
+  3. hashes the local files and matches them to Proton photos by CONTENT,
+     never by name: the CLI renames duplicates, and identical content can exist
+     under several uids.
+  4. downloads what's missing into the folder of its capture year, in batches
+     (the CLI pays ~1.4 s of startup per call). Every download is confirmed by
+     sha1, not by counting files: a partly failed batch is retried one photo
+     at a time.
+  5. sets each file's date to the capture date and moves files into the right
+     year folder if needed.
+  6. with --albums, rebuilds every album as a folder of HARD LINKS: a second,
+     album-based view of the same files, using no extra space.
+  7. saves the uid -> file map (.proton-photo-map.json), used by
+     photo-prune.py and photo-redate.py, and reports:
+     - photos deleted from the backup but still on Proton. Deleted on
+       purpose? photo-prune.py --from-missing trashes them on Proton.
+       By accident? --redownload-missing gets them back.
+     - local files that match no Proton photo (unrecognized-photos.txt).
 
-  --details is strongly recommended: without it the inventory has no sha1
-  and downloads can only be confirmed by counting files.
+  The run can be interrupted at any time: downloads are recorded one by one
+  in .proton-photo-state.txt and the next run picks up from there. Photos
+  that fail are listed in photos-not-downloaded.txt and retried next time
+  (--skip-failed leaves them out).
 
-  Photos that fail are listed in photos-not-downloaded.txt in the
-  destination folder; rerun the script to retry only those (or pass
-  --skip-failed to leave them out).
-
-  photo-fixdate.py and album-backup.py build on the inventory saved here.
+ALBUMS
+  Album folders go in --album-dir (default: "album" inside the backup
+  folder); they must be on the same volume as the photos (symlinks are used
+  otherwise). Two different photos of an album with the same file name both
+  appear, the second with a " (1)" suffix. Album folders only grow: to rebuild
+  them cleanly, delete the album folder and run again.
 
 USAGE
-  ./photo-backup.py /path/to/backup/proton-photos --details
-  ./photo-backup.py /path/to/backup/proton-photos --details --batch 5 --timeout 60
+  ./photo-backup.py /path/to/backup/proton-photos
+  ./photo-backup.py /path/to/backup/proton-photos --albums --album-dir /path/to/backup/proton-albums
+  ./photo-backup.py /path/to/backup/proton-photos --import ~/Downloads
   ./photo-backup.py /path/to/backup/proton-photos --dry-run
 
-  A small --batch (5) is slower in theory but much faster in practice on a
-  large library: big batches time out often, and every timeout wastes the
-  whole batch.
-
 SAFETY
-  Downloads only. Never modifies or deletes anything on Proton.
+  Never modifies or deletes anything on Proton. Locally it adds files, sets
+  dates, moves files between year folders and creates album links: it never
+  deletes a photo.
 """
 
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -61,46 +73,101 @@ import protonlib
 
 STATE = ".proton-photo-state.txt"
 INVENTORY = ".proton-photo-inventory.json"
+PHOTO_MAP = ".proton-photo-map.json"
+ALBUM_MAP = ".proton-albums.json"
 FAILED = "photos-not-downloaded.txt"
+UNRECOGNIZED = "unrecognized-photos.txt"
+DELETED_LOCALLY = "photos-deleted-locally.txt"
+WORK_DIRS = {"_reupload"}       # photo-redate.py's work folder
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Incremental backup of the Proton Drive Photos section.")
-    p.add_argument("dest", help="destination folder (e.g. /path/to/backup/proton-photos)")
+        description="Incremental backup of Proton Photos, by capture year, with albums.")
+    p.add_argument("dest", help="backup folder, e.g. /path/to/backup/proton-photos")
+    p.add_argument("--albums", action="store_true",
+                   help="also rebuild the albums as folders of hard links")
+    p.add_argument("--album-dir", default="album",
+                   help="where the album folders go: relative to the backup folder or "
+                        "absolute (default: album)")
+    p.add_argument("--import", dest="import_dir", default=None, metavar="DIR",
+                   help="first add photos downloaded by hand into DIR (moved, matched by name)")
+    p.add_argument("--redownload-missing", action="store_true",
+                   help="download again photos deleted from the backup but still on Proton")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
-    p.add_argument("--batch", type=int, default=50,
-                   help="photos per CLI invocation (default 50)")
-    p.add_argument("--details", action="store_true",
-                   help="inventory with names, sizes and sha1 (slower, recommended)")
-    p.add_argument("--timeout", type=int, default=900,
-                   help="timeout per batch, in seconds (default 900)")
+    p.add_argument("--batch", type=int, default=5,
+                   help="photos per CLI call (default 5: bigger batches time out more)")
+    p.add_argument("--timeout", type=int, default=300,
+                   help="timeout per CLI call, in seconds (default 300)")
     p.add_argument("--limit", type=int, default=0,
                    help="download at most N photos and stop (0 = all)")
     p.add_argument("--reuse-inventory", action="store_true",
-                   help="reuse the saved inventory instead of reading it again")
-    p.add_argument("--dry-run", action="store_true",
-                   help="show what would be downloaded")
+                   help="reuse the timeline and album list saved last time instead of "
+                        "reading them from Proton")
     p.add_argument("--skip-failed", action="store_true",
-                   help=f"skip the photos listed in {FAILED}")
-    return p.parse_args()
+                   help=f"don't retry the photos listed in {FAILED}")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would be downloaded, changed and imported")
+    a = p.parse_args()
+    a.dest = os.path.expanduser(a.dest)
+    a.album_base = os.path.join(a.dest, os.path.expanduser(a.album_dir))
+    if a.import_dir:
+        a.import_dir = os.path.expanduser(a.import_dir)
+    return a
 
 
-def load_inventory(args):
-    inv_path = os.path.join(args.dest, INVENTORY)
-    if args.reuse_inventory and os.path.exists(inv_path):
-        with open(inv_path, encoding="utf-8") as f:
-            data = json.load(f)
-        print(f"  Inventory reused: {len(data)} photos")
-        return data
+# --- Proton inventory --------------------------------------------------------
 
-    print("  Reading the inventory from Proton...")
-    t0 = time.time()
-    cmd = ["photo", "timeline", "-j"]
-    if args.details:
-        cmd.insert(2, "-d")
+def uid_of(x):
+    return x.get("nodeUid") or x.get("uid")
+
+
+def name_of(x):
+    return (x.get("name") or {}).get("value") or ""
+
+
+def sha_of_item(x):
+    return ((x.get("activeRevision") or {}).get("claimedDigests") or {}).get("sha1")
+
+
+def capture_time(x):
+    """Capture date, with fallbacks in order of reliability. The modification
+    time is often the date of a later import, so it comes last."""
+    ph = x.get("photo") or {}
+    rev = x.get("activeRevision") or {}
+    cam = (rev.get("claimedAdditionalMetadata") or {}).get("Camera") or {}
+    return (ph.get("captureTime") or cam.get("CaptureTime") or x.get("captureTime")
+            or rev.get("claimedModificationTime") or x.get("creationTime"))
+
+
+def capture_dt(x):
+    ts = capture_time(x)
+    if not ts:
+        return None
     try:
-        r = protonlib.run_cli(args.cli, cmd, timeout=3600)
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def year_of(x):
+    dt = capture_dt(x)
+    return str(dt.astimezone(timezone.utc).year) if dt else "no-date"
+
+
+def read_timeline(a):
+    path = os.path.join(a.dest, INVENTORY)
+    if a.reuse_inventory and os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"  Timeline reused: {len(data)} photos")
+        return data
+    print("  Reading the timeline from Proton...")
+    t0 = time.time()
+    try:
+        r = protonlib.run_cli(a.cli, ["photo", "timeline", "-d", "-j"], timeout=3600)
+    except FileNotFoundError:
+        sys.exit(f"ERROR: '{a.cli}' not found. Use --cli to point at it.")
     except subprocess.TimeoutExpired:
         sys.exit("ERROR: 'photo timeline' didn't answer within an hour.")
     if r.returncode != 0:
@@ -109,201 +176,266 @@ def load_inventory(args):
         data = json.loads(r.stdout)
     except json.JSONDecodeError as e:
         sys.exit(f"ERROR: 'photo timeline' output is not valid JSON: {e}")
-
-    print(f"  {len(data)} photos in the inventory ({int(time.time()-t0)}s)")
-    with open(inv_path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+    print(f"  {len(data)} photos on Proton ({int(time.time() - t0)}s)")
+    if not a.dry_run:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
     return data
 
 
-def uid_of(item):
-    return item.get("nodeUid") or item.get("uid")
-
-
-def year_of(item):
-    # order of reliability: the CAPTURE date first. claimedModificationTime
-    # is often the date of a later import and puts photos in the wrong year.
-    ph = item.get("photo") or {}
-    rev = item.get("activeRevision") or {}
-    cam = (rev.get("claimedAdditionalMetadata") or {}).get("Camera") or {}
-    ts = (ph.get("captureTime") or cam.get("CaptureTime")
-          or item.get("captureTime")
-          or rev.get("claimedModificationTime") or item.get("creationTime"))
-    if not ts:
-        return "no-date"
+def read_albums(a):
+    """[{uid, name, photoCount, photos: [uid...], error}] for every album."""
+    path = os.path.join(a.dest, ALBUM_MAP)
+    if a.reuse_inventory and os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            albums = json.load(f)
+        print(f"  Album list reused: {len(albums)} albums")
+        return albums
+    print("  Reading the albums from Proton...")
+    r = protonlib.run_cli(a.cli, ["album", "list", "-j"], a.timeout)
+    if r.returncode != 0:
+        sys.exit(f"ERROR from 'album list': {(r.stderr or r.stdout)[:300]}")
     try:
-        return str(datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                   .astimezone(timezone.utc).year)
-    except Exception:
-        return "no-date"
+        listed = json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        sys.exit(f"ERROR: 'album list' didn't return valid JSON: {e}")
+    albums = []
+    t0 = time.time()
+    for i, alb in enumerate(listed, 1):
+        uid = alb.get("uid")
+        name = (alb.get("name") or {}).get("value") or f"album-{uid[-8:] if uid else i}"
+        expected = (alb.get("album") or {}).get("photoCount", 0)
+        sys.stderr.write(f"\r  {i}/{len(listed)}  {name[:44]:<44}")
+        sys.stderr.flush()
+        try:
+            r = protonlib.run_cli(a.cli, ["album", "photos", "-j", f"/albums/{uid}"], a.timeout)
+            photos = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else []
+            err = None if r.returncode == 0 else (r.stderr or "")[:150]
+        except Exception as e:
+            photos, err = [], str(e)[:150]
+        uids = [f.get("nodeUid") for f in photos if f.get("nodeUid")]
+        albums.append({"uid": uid, "name": name, "photoCount": expected,
+                       "coverPhotoNodeUid": (alb.get("album") or {}).get("coverPhotoNodeUid"),
+                       "photos": uids, "creationTime": alb.get("creationTime"), "error": err})
+        if err or (expected and len(uids) != expected):
+            sys.stderr.write(f"\n    WARNING: {name}: expected {expected}, read {len(uids)}"
+                             f"{' - ' + err if err else ''}\n")
+    sys.stderr.write("\r" + " " * 70 + "\r")
+    print(f"  {len(albums)} albums read ({int(time.time() - t0)}s)")
+    if not a.dry_run:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(albums, f, ensure_ascii=False, indent=1)
+    return albums
 
 
-def load_state(dest):
-    p = os.path.join(dest, STATE)
+# --- local files -------------------------------------------------------------
+
+def list_local(a):
+    """Every photo file in the backup, outside album and work folders."""
+    out = []
+    album_base = os.path.realpath(a.album_base)
+    for dp, dn, fn in os.walk(a.dest):
+        dn[:] = [d for d in dn if not d.startswith(".") and d not in WORK_DIRS
+                 and os.path.realpath(os.path.join(dp, d)) != album_base]
+        for f in fn:
+            if f.startswith(".") or f.endswith(".txt") or f.endswith(".json"):
+                continue
+            out.append(os.path.join(dp, f))
+    return out
+
+
+def hash_files(paths, label):
+    hashes = {}
+    t0 = time.time()
+    for i, p in enumerate(paths, 1):
+        h = protonlib.sha1_of(p)
+        if h:
+            hashes[p] = h
+        if i % 250 == 0 or i == len(paths):
+            sys.stderr.write(f"\r  {label}: {i}/{len(paths)} files | {int(time.time() - t0)}s   ")
+            sys.stderr.flush()
+    if paths:
+        sys.stderr.write("\n")
+    return hashes
+
+
+def same_name(filename, proton_name):
+    """'IMG_1 (2).jpg' counts as 'IMG_1.jpg': the CLI adds that suffix on clashes."""
+    stem, ext = os.path.splitext(filename)
+    stem = re.sub(r" \(\d+\)$", "", stem)
+    return (stem + ext).lower() == proton_name.lower()
+
+
+def build_map(inventory, local_hashes):
+    """uid -> local file, matched by content. Several photos can share the same
+    content (the same picture uploaded twice): each gets its own copy if there
+    is one, preferring the copy with its own name; otherwise they share it."""
+    files_by_sha = {}
+    for p, h in sorted(local_hashes.items()):
+        files_by_sha.setdefault(h, []).append(p)
+    photo_map = {}
+    for h, records in _records_by_sha(inventory).items():
+        paths = files_by_sha.get(h)
+        if not paths:
+            continue
+        free = list(paths)
+        pending = []
+        for x in records:
+            hit = next((p for p in free if same_name(os.path.basename(p), name_of(x))), None)
+            if hit:
+                photo_map[uid_of(x)] = hit
+                free.remove(hit)
+            else:
+                pending.append(x)
+        for x in pending:
+            photo_map[uid_of(x)] = free.pop(0) if free else paths[0]
+    return photo_map
+
+
+def _records_by_sha(inventory):
+    out = {}
+    for x in inventory:
+        h = sha_of_item(x)
+        if h and uid_of(x):
+            out.setdefault(h, []).append(x)
+    return out
+
+
+def load_state(a):
+    p = os.path.join(a.dest, STATE)
     if not os.path.exists(p):
         return set()
     with open(p, encoding="utf-8") as f:
         return set(l.strip() for l in f if l.strip())
 
 
-def main():
-    a = parse_args()
-    a.dest = os.path.expanduser(a.dest)
-    os.makedirs(a.dest, exist_ok=True)
+def write_state(a, uids):
+    with open(os.path.join(a.dest, STATE), "w", encoding="utf-8") as f:
+        if uids:
+            f.write("\n".join(sorted(uids)) + "\n")
 
-    print("")
-    print(f"  Destination : {a.dest}")
-    print(f"  Batch       : {a.batch} photos per invocation")
-    print("")
 
-    inventory = load_inventory(a)
+def append_state(a, uids):
+    with open(os.path.join(a.dest, STATE), "a", encoding="utf-8") as f:
+        f.write("\n".join(uids) + "\n")
 
-    # sha1 declared by Proton for each photo: used to confirm downloads by
-    # CONTENT instead of by the number of files that showed up in the folder.
-    expected_sha = {}
+
+def unique_path(path):
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(path):
+        path = f"{stem} ({n}){ext}"
+        n += 1
+    return path
+
+
+# --- import of photos downloaded by hand -----------------------------------
+
+def import_manual(a, inventory, done):
+    """Move files from --import DIR into the backup when their name matches a
+    photo not downloaded yet. Returns the uids imported."""
+    if not os.path.isdir(a.import_dir):
+        sys.exit(f"ERROR: {a.import_dir} doesn't exist.")
+    by_name = {}
     for x in inventory:
         u = uid_of(x)
-        h = ((x.get("activeRevision") or {}).get("claimedDigests") or {}).get("sha1")
-        if u and h:
-            expected_sha[u] = h
-    if expected_sha:
-        print(f"  Content verification on ({len(expected_sha)} sha1 available)")
-    else:
-        print("  WARNING: inventory without sha1 (--details missing).")
-        print("  Downloads will be confirmed by counting files: less reliable.")
-
-    done = load_state(a.dest)
-
-    # The state file keeps the uids already downloaded, but photos trashed on
-    # Proton would stay in it forever. Only those still in the inventory are
-    # kept, so the count reflects reality and the file doesn't keep growing.
-    valid = {u for u in (uid_of(x) for x in inventory) if u}
-    obsolete = done - valid
-    if obsolete:
-        done = done & valid
-        with open(os.path.join(a.dest, STATE), "w", encoding="utf-8") as f:
-            if done:
-                f.write("\n".join(sorted(done)) + "\n")
-        print(f"  State file cleaned: {len(obsolete)} uids no longer on Proton")
-
-    print(f"  Already downloaded: {len(done)}")
-
-    skipped = set()
-    if a.skip_failed:
-        p = os.path.join(a.dest, FAILED)
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                skipped = set(l.split("\t")[0].strip() for l in f if l.strip())
-            print(f"  Skipped (failed before): {len(skipped)}")
-        done = done | skipped
-
-    # group what's missing by year
-    todo = {}
-    for it in inventory:
-        u = uid_of(it)
-        if not u or u in done:
+        if u and u not in done and name_of(x):
+            # case-insensitive: the browser may save .MOV where Proton says .mov
+            by_name.setdefault(name_of(x).lower(), []).append(x)
+    imported = []
+    print(f"  Import from {a.import_dir}:")
+    for f in sorted(os.listdir(a.import_dir)):
+        src = os.path.join(a.import_dir, f)
+        if f.startswith(".") or not os.path.isfile(src):
             continue
-        todo.setdefault(year_of(it), []).append(u)
+        rec = by_name.get(f.lower())
+        if not rec:
+            continue
+        if len(rec) > 1:
+            print(f"    AMBIGUOUS (several photos with this name, rename it by hand): {f}")
+            continue
+        x = rec[0]
+        expected = sha_of_item(x)
+        note = ""
+        if expected and protonlib.sha1_of(src) != expected:
+            note = "   [different content: the browser may have converted it]"
+        year = year_of(x)
+        print(f"    {f} -> {year}/{note}")
+        if a.dry_run:
+            continue
+        os.makedirs(os.path.join(a.dest, year), exist_ok=True)
+        shutil.move(src, unique_path(os.path.join(a.dest, year, f)))
+        imported.append(uid_of(x))
+    if imported:
+        append_state(a, imported)
+        fp = os.path.join(a.dest, FAILED)
+        if os.path.exists(fp):
+            gone = set(imported)
+            with open(fp, encoding="utf-8") as fh:
+                rows = [l for l in fh if l.strip() and l.split("\t")[0].strip() not in gone]
+            with open(fp, "w", encoding="utf-8") as fh:
+                fh.writelines(rows)
+    print(f"    {len(imported)} imported")
+    return imported
 
-    total = sum(len(v) for v in todo.values())
-    if total == 0:
-        print("")
-        print("  No new photos: the backup is in sync.")
-        return 0
 
-    print(f"  To download : {total}")
-    print("")
-    for y in sorted(todo):
-        print(f"    {y}: {len(todo[y])}")
-    print("")
+# --- downloads ---------------------------------------------------------------
 
-    if a.dry_run:
-        print("  (--dry-run: nothing downloaded)")
-        return 0
-
-    state_path = os.path.join(a.dest, STATE)
-    downloaded = 0
-    failed = []
+def download(a, todo, total, expected_sha):
+    """Download the missing photos, year by year; returns (count, failed)."""
+    downloaded, failed = 0, []
     t0 = time.time()
-
     for year in sorted(todo, reverse=True):
         uids = todo[year]
         folder = os.path.join(a.dest, year)
         os.makedirs(folder, exist_ok=True)
-
         for i in range(0, len(uids), a.batch):
             if a.limit and downloaded >= a.limit:
                 print(f"\n  Reached the limit of {a.limit} photos.")
-                break
+                return downloaded, failed
             batch = uids[i:i + a.batch]
             before = set(os.listdir(folder))
-            cmd = ["photo", "download", "-c", "rename"] \
-                + [f"/photos/{u}" for u in batch] + [folder]
             try:
-                r = protonlib.run_cli(a.cli, cmd, timeout=a.timeout)
-                ok = (r.returncode == 0)
-                err = (r.stderr or r.stdout or "").strip()[:200]
+                r = protonlib.run_cli(a.cli, ["photo", "download", "-c", "rename"]
+                                      + [f"/photos/{u}" for u in batch] + [folder],
+                                      timeout=a.timeout)
+                ok, err = r.returncode == 0, (r.stderr or r.stdout or "").strip()[:200]
             except subprocess.TimeoutExpired:
                 ok, err = False, f"timed out after {a.timeout}s"
 
-            new_files = set(os.listdir(folder)) - before
-            arrived = len(new_files)
-
-            # which uids really arrived: compare the sha1 of the new files with
-            # the one Proton declares for each photo
-            confirmed = set()
-            if expected_sha:
-                new_hashes = set()
-                for f in new_files:
-                    h = protonlib.sha1_of(os.path.join(folder, f))
-                    if h:
-                        new_hashes.add(h)
-                for u in batch:
-                    h = expected_sha.get(u)
-                    if h is None or h in new_hashes:
-                        confirmed.add(u)
-            elif ok and arrived >= len(batch):
-                confirmed = set(batch)
-
-            if (not ok) and len(batch) == 1:
+            # which photos really arrived: the sha1 of the new files against the
+            # one Proton declares for each photo (a photo without a sha1 can
+            # only be confirmed by the call succeeding and a file appearing)
+            arrived = set(os.listdir(folder)) - before
+            new_hashes = {h for h in (protonlib.sha1_of(os.path.join(folder, f))
+                                      for f in arrived) if h}
+            confirmed = [u for u in batch
+                         if (expected_sha.get(u) in new_hashes if expected_sha.get(u)
+                             else ok and arrived)]
+            if not confirmed and not ok and len(batch) == 1:
                 # already a one-photo batch: retrying it alone would be identical
                 failed.append((batch[0], err))
-                el = int(time.time() - t0)
-                sys.stderr.write(f"\r  {year}: {downloaded}/{total} photos | {el}s "
-                                 f"| {len(failed)} failed     ")
-                sys.stderr.flush()
                 continue
-
             if len(confirmed) == len(batch):
-                with open(state_path, "a", encoding="utf-8") as f:
-                    f.write("\n".join(batch) + "\n")
+                append_state(a, batch)
                 downloaded += len(batch)
             else:
-                # record the confirmed ones right away, so the one-by-one
-                # retry only covers what is really missing
                 if confirmed:
-                    with open(state_path, "a", encoding="utf-8") as f:
-                        f.write("\n".join(sorted(confirmed)) + "\n")
+                    append_state(a, confirmed)
                     downloaded += len(confirmed)
-                # partial or failed batch: we don't know which photos made it,
-                # so retry one by one instead of recording them in bulk
+                # partial or failed batch: retry the rest one by one
                 recovered = 0
                 for u in [x for x in batch if x not in confirmed]:
                     before_one = set(os.listdir(folder))
                     try:
                         r2 = protonlib.run_cli(a.cli, ["photo", "download", "-c", "rename",
-                                                       f"/photos/{u}", folder],
-                                               timeout=a.timeout)
+                                                       f"/photos/{u}", folder], timeout=a.timeout)
                         came = set(os.listdir(folder)) - before_one
                         expected = expected_sha.get(u)
-                        if expected:
-                            got_it = any(protonlib.sha1_of(os.path.join(folder, f)) == expected
-                                         for f in came)
-                        else:
-                            got_it = bool(came)
+                        got_it = (any(protonlib.sha1_of(os.path.join(folder, f)) == expected
+                                      for f in came) if expected else bool(came))
                         if r2.returncode == 0 and got_it:
-                            with open(state_path, "a", encoding="utf-8") as f:
-                                f.write(u + "\n")
+                            append_state(a, [u])
                             recovered += 1
                         else:
                             failed.append((u, (r2.stderr or "")[:120]))
@@ -313,28 +445,254 @@ def main():
                 if not ok:
                     sys.stderr.write(f"\n  batch failed ({err}); "
                                      f"recovered {recovered}/{len(batch)} one by one\n")
-
             el = int(time.time() - t0)
             rate = downloaded / el if el else 0
             left = int((total - downloaded) / rate) if rate > 0 else 0
-            sys.stderr.write(
-                f"\r  {year}: {downloaded}/{total} photos | {el}s | {rate:.1f} photos/s "
-                f"| about {left//60} min left    ")
+            sys.stderr.write(f"\r  {year}: {downloaded}/{total} photos | {el}s | "
+                             f"about {left // 60} min left    ")
             sys.stderr.flush()
-        if a.limit and downloaded >= a.limit:
-            break
-
     sys.stderr.write("\n")
+    return downloaded, failed
+
+
+# --- dates, year folders, albums ----------------------------------------------
+
+def fix_dates(a, photo_map, by_uid):
+    """Set each file's date to the capture date and move it into the folder of
+    its capture year. Returns (dates set, files moved)."""
+    dated = moved = 0
+    # photos with identical content may share one file: its date and year come
+    # from one owner (preferably the photo with the same name), so the file
+    # isn't moved back and forth between years on every run
+    owners = {}
+    for uid, path in sorted(photo_map.items()):
+        cur = owners.get(path)
+        if cur is None or (not same_name(os.path.basename(path), name_of(by_uid[cur]))
+                           and same_name(os.path.basename(path), name_of(by_uid[uid]))):
+            owners[path] = uid
+    for path, uid in sorted(owners.items()):
+        dt = capture_dt(by_uid[uid])
+        if not dt:
+            continue
+        target_dir = os.path.join(a.dest, str(dt.astimezone(timezone.utc).year))
+        if os.path.dirname(path) != target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+            new = unique_path(os.path.join(target_dir, os.path.basename(path)))
+            shutil.move(path, new)
+            for u, p in photo_map.items():       # identical content may share the file
+                if p == path:
+                    photo_map[u] = new
+            path = new
+            moved += 1
+        try:
+            os.utime(path, (dt.timestamp(), dt.timestamp()))
+            dated += 1
+        except OSError:
+            pass
+    return dated, moved
+
+
+def same_photo(a_path, b_path):
+    """Same file (hard link), or a different file with identical content."""
+    if os.path.samefile(a_path, b_path):
+        return True
+    h = protonlib.sha1_of(a_path)
+    return h is not None and h == protonlib.sha1_of(b_path)
+
+
+def safe_name(name):
+    """A name usable as a folder name on macOS."""
+    for ch in (":", "/", "\\", "\0"):
+        name = name.replace(ch, "_")
+    return name.strip() or "unnamed"
+
+
+def link_albums(a, albums, photo_map):
+    """Returns (links created, already present, album photos without a local file)."""
+    created = existing = 0
+    unlinked = []
+    os.makedirs(a.album_base, exist_ok=True)
+    for x in albums:
+        folder = os.path.join(a.album_base, safe_name(x["name"]))
+        os.makedirs(folder, exist_ok=True)
+        for u in x["photos"]:
+            src = photo_map.get(u)
+            if not src or not os.path.exists(src):
+                unlinked.append((x["name"], u))
+                continue
+            # two different photos of the same album can share a file name: a
+            # file already there counts as "this photo" only with the same content
+            dst = os.path.join(folder, os.path.basename(src))
+            stem, ext = os.path.splitext(dst)
+            n = 1
+            while os.path.exists(dst) and not same_photo(src, dst):
+                dst = f"{stem} ({n}){ext}"
+                n += 1
+            if os.path.exists(dst):
+                existing += 1
+                continue
+            try:
+                os.link(src, dst)
+                created += 1
+            except OSError:
+                try:
+                    os.symlink(src, dst)
+                    created += 1
+                except OSError:
+                    unlinked.append((x["name"], u))
+    return created, existing, unlinked
+
+
+# --- main --------------------------------------------------------------------
+
+def main():
+    a = parse_args()
+    os.makedirs(a.dest, exist_ok=True)
     print("")
-    print(f"  Downloaded : {downloaded}")
-    print(f"  Failed     : {len(failed)}")
+    print(f"  Backup : {a.dest}")
+    if a.albums:
+        print(f"  Albums : {a.album_base}")
+    print("")
+
+    inventory = read_timeline(a)
+    by_uid = {uid_of(x): x for x in inventory if uid_of(x)}
+    expected_sha = {u: sha_of_item(x) for u, x in by_uid.items() if sha_of_item(x)}
+    proton_hashes = set(expected_sha.values())
+    if len(expected_sha) < len(by_uid):
+        print(f"  {len(by_uid) - len(expected_sha)} photos have no sha1 on Proton: "
+              "they can be downloaded but not checked by content.")
+
+    # the state file keeps the uids already downloaded; photos trashed on Proton
+    # are dropped from it, so it reflects reality and doesn't grow forever
+    done = load_state(a)
+    obsolete = done - set(by_uid)
+    if obsolete and not a.dry_run:
+        done -= obsolete
+        write_state(a, done)
+
+    if a.import_dir:
+        done |= set(import_manual(a, inventory, done))
+
+    # what's really on disk, by content
+    local = list_local(a)
+    local_hashes = hash_files(local, "hashing local files")
+    on_disk = set(local_hashes.values())
+
+    # recorded as downloaded, still on Proton, but their content is nowhere in
+    # the backup: deleted locally (on purpose, or by accident)
+    deleted_locally = sorted(u for u in done if u in expected_sha
+                             and expected_sha[u] not in on_disk)
+    if a.redownload_missing:
+        done -= set(deleted_locally)
+
+    skipped = set()
+    if a.skip_failed and os.path.exists(os.path.join(a.dest, FAILED)):
+        with open(os.path.join(a.dest, FAILED), encoding="utf-8") as f:
+            skipped = set(l.split("\t")[0].strip() for l in f if l.strip())
+
+    todo, already_there = {}, []
+    for u, x in by_uid.items():
+        if u in done or u in skipped:
+            continue
+        # already in the backup by content (e.g. copied there by hand): just record it
+        if expected_sha.get(u) in on_disk:
+            already_there.append(u)
+            continue
+        todo.setdefault(year_of(x), []).append(u)
+    if already_there and not a.dry_run:
+        append_state(a, already_there)
+    total = sum(len(v) for v in todo.values())
+
+    skipped_now = sum(1 for u in by_uid if u in skipped and u not in done)
+    print(f"  On Proton: {len(by_uid)}   in the backup: {len(by_uid) - total - skipped_now}   "
+          f"to download: {total}"
+          + (f"   skipped (failed before): {skipped_now}" if skipped_now else ""))
+    for y in sorted(todo):
+        print(f"    {y}: {len(todo[y])}")
+
+    if a.dry_run:
+        print("")
+        print(f"  Deleted from the backup, still on Proton: {len(deleted_locally)}")
+        print(f"  Local files matching no Proton photo: "
+              f"{sum(1 for h in local_hashes.values() if h not in proton_hashes)}")
+        print("")
+        print("  (--dry-run: nothing downloaded, moved or linked)")
+        return 0
+
+    downloaded, failed = (0, [])
+    if total:
+        print("")
+        downloaded, failed = download(a, todo, total, expected_sha)
+        new_files = [p for p in list_local(a) if p not in local_hashes]
+        local_hashes.update(hash_files(new_files, "hashing new files"))
+
+    photo_map = build_map(inventory, local_hashes)
+    dated, moved = fix_dates(a, photo_map, by_uid)
+
+    # keep the last known path of photos deleted locally but still on Proton,
+    # so photo-prune.py --from-missing can still find them
+    previous = {}
+    map_path = os.path.join(a.dest, PHOTO_MAP)
+    if os.path.exists(map_path):
+        with open(map_path, encoding="utf-8") as f:
+            previous = json.load(f)
+    still_deleted = [u for u in deleted_locally if u not in photo_map]
+    saved_map = dict(photo_map)
+    for u in still_deleted:
+        if u in previous and not os.path.exists(previous[u]):
+            saved_map[u] = previous[u]
+    with open(map_path, "w", encoding="utf-8") as f:
+        json.dump(saved_map, f, ensure_ascii=False, indent=1)
+
+    unlinked = []
+    if a.albums:
+        print("")
+        albums = read_albums(a)
+        created, existing, unlinked = link_albums(a, albums, photo_map)
+
+    unrecognized = sorted(p for p, h in local_hashes.items()
+                          if h not in proton_hashes and os.path.exists(p))
+    with open(os.path.join(a.dest, UNRECOGNIZED), "w", encoding="utf-8") as f:
+        f.write("".join(p + "\n" for p in unrecognized))
+    with open(os.path.join(a.dest, DELETED_LOCALLY), "w", encoding="utf-8") as f:
+        for u in still_deleted:
+            x = by_uid[u]
+            f.write(f"{u}\t{name_of(x)}\t{year_of(x)}\n")
+    failed_path = os.path.join(a.dest, FAILED)
     if failed:
-        p = os.path.join(a.dest, FAILED)
-        with open(p, "w", encoding="utf-8") as f:
+        with open(failed_path, "w", encoding="utf-8") as f:
             for u, e in failed:
                 f.write(f"{u}\t{e}\n")
-        print(f"  List       : {p}")
-        print("  Rerun the script: it retries only the missing ones.")
+    elif not a.skip_failed and os.path.exists(failed_path):
+        os.remove(failed_path)
+
+    print("")
+    print("=" * 66)
+    print(f"  Downloaded ..................... {downloaded}")
+    if failed:
+        print(f"  FAILED ......................... {len(failed)}   (see {FAILED})")
+    print(f"  Photos in the backup ........... {len(photo_map)}")
+    print(f"  Dates set / moved to their year  {dated} / {moved}")
+    if a.albums:
+        print(f"  Album links created / present .. {created} / {existing}")
+        if unlinked:
+            print(f"  Album photos without a file .... {len(unlinked)}")
+    if still_deleted:
+        print(f"  Deleted from the backup, still on Proton: {len(still_deleted)}"
+              f"   (see {DELETED_LOCALLY})")
+    if unrecognized:
+        print(f"  Local files matching no Proton photo: {len(unrecognized)}"
+              f"   (see {UNRECOGNIZED})")
+    print("=" * 66)
+
+    if still_deleted:
+        print("")
+        print("  Some photos were deleted from the backup but are still on Proton.")
+        print("  Deleted on purpose?  ./photo-prune.py DEST --from-missing")
+        print("  Lost by accident?    run again with --redownload-missing")
+    if failed:
+        print("")
+        print("  Some downloads failed: run again, it retries only those.")
         return 1
     print("")
     print("  Backup complete.")

@@ -23,7 +23,7 @@ a ~36,000-photo library onto an external SSD.
 |---|---|
 | Python 3 (`python3 --version`; on macOS it comes with the Command Line Tools) | all Python scripts |
 | The official Proton Drive CLI `proton-drive`, logged in (`proton-drive auth login`) | almost all scripts |
-| `exiftool` (`brew install exiftool`) | `photo-reupload.py` |
+| `exiftool` (`brew install exiftool`) | `photo-redate.py --apply`; optional for `photo-compare.py` |
 | `fswatch` (`brew install fswatch`) | `protondrive-lockfile-guard.sh` |
 
 Keep all the files in the same folder: the Python scripts import
@@ -50,16 +50,10 @@ path: it only exists through the CLI's `photo` and `album` commands.
 
 | Script | What it does |
 |---|---|
-| `photo-backup.py` | Incremental backup of the Photos section into **one folder per capture year**, every download confirmed by sha1. |
-| `photo-fixdate.py` | Restores capture dates on downloaded files, sorts them by year, and builds the **uid → local file map** the other photo scripts rely on. |
-| `album-backup.py` | Saves the album structure and rebuilds every album as a folder of **hard links**: a second, album-based view of the same backup, using no extra space. |
+| `photo-backup.py` | Incremental backup of the Photos section into **one folder per capture year**, with correct file dates; every download confirmed by sha1. `--albums` also rebuilds every album as a folder of **hard links**: a second, album-based view of the same files, using no extra space. Reports photos deleted from the backup and local files that match nothing on Proton. |
+| `photo-redate.py` | Fixes the date of scanned prints that sit in the wrong year on the timeline, using the year in the album name: first a plan to review, then `--apply` re-uploads corrected copies and trashes the originals. |
 | `photo-prune.py` | Propagates to Proton's trash the photos you deleted from the local backup in Finder. Refuses to empty an album. |
-| `photo-redate.py` | Plans a date correction for scanned prints that sit in the wrong year on the timeline, using the year in the album name. Changes nothing. |
-| `photo-reupload.py` | Applies that plan: fixes EXIF, re-uploads, re-adds to the album, trashes the original, restores the name. Six resumable phases. |
-| `photo-import.py` | Adds to the backup photos you had to download by hand from the web interface. |
-| `photo-unlinked.py` | Diagnostic: Proton photos with no matching local file, and why. |
-| `photo-unrecognized.py` | Diagnostic: local files whose content matches no photo on Proton. |
-| `photo-compare.py` | Which photos in one or more local folders (e.g. Dropbox Camera Uploads) are missing from Proton Photos, matched by content or capture time. Can write an upload script for the missing ones. |
+| `photo-compare.py` | Which photos in one or more local folders (e.g. Dropbox Camera Uploads) are missing from Proton Photos, matched by content or capture time. `--upload-script` uploads the missing ones. |
 
 ### Sync client
 
@@ -96,23 +90,24 @@ backup matches what Proton *declares* to hold.
 ### Monthly photo backup
 
 ```bash
-./photo-backup.py $B/proton-photos --details --batch 5 --timeout 60
-./photo-fixdate.py $B/proton-photos --reorganize
-./album-backup.py $B/proton-photos --album-dir $B/proton-albums
+./photo-backup.py $B/proton-photos --albums --album-dir $B/proton-albums
 ```
-
-- `--details` is essential: without it the inventory has no sha1 and
-  downloads can only be confirmed by counting files, which is misleading.
-- `--batch 5`: bigger batches time out often on large libraries, and every
-  timeout wastes the whole batch.
-- **Order matters**: `photo-fixdate.py` produces the uid → file map that
-  `album-backup.py` (and pruning) depend on. Always run it in between.
 
 The result is two views of the same photos: `proton-photos/<year>/` in
 chronological order, and `proton-albums/<album>/` organized like on Proton.
 
-If `album-backup.py` reports photos "not linked", `photo-unlinked.py` lists
-exactly which ones and why.
+- Photos are matched to local files by **content**, never by name: the CLI
+  renames duplicates, and identical content can exist under several uids.
+- Downloads go in batches of 5: bigger batches time out often on large
+  libraries, and every timeout wastes the whole batch.
+- The summary reports, with a full list next to the photos:
+  - photos **deleted from the backup but still on Proton**: deleted on
+    purpose, see *Pruning photos*; by accident, run again with
+    `--redownload-missing`;
+  - **local files that match no Proton photo** (`unrecognized-photos.txt`).
+- Photos that can't be downloaded through the CLI (typically iOS edits,
+  `_modified`) can be downloaded by hand from the web interface and added with
+  `--import ~/Downloads`.
 
 ### Pruning photos
 
@@ -124,9 +119,7 @@ them (the macOS Trash is your safety net). Then:
 ./photo-prune.py $B/proton-photos --from-missing --apply
 ```
 
-Then run the monthly photo backup again, **without** `--reuse` on
-`album-backup.py`: a reused album map still holds uids now in the trash, which
-would show up as "not linked". Proton's trash has no expiry.
+Then run the monthly photo backup again. Proton's trash has no expiry.
 
 ### Fixing dates of scanned photos
 
@@ -135,16 +128,17 @@ semantically wrong: a 2003 event shows up in 2019. If your albums are named
 starting with the year (`2003 - Holiday in Rome`), the albums know better:
 
 ```bash
-./photo-redate.py $B/proton-photos --exclude-file excluded.txt    # plan only
-./photo-reupload.py $B/proton-photos --apply --limit 5 --skip-video  # try a few
-./photo-reupload.py $B/proton-photos --apply --skip-video
+./photo-redate.py $B/proton-photos --exclude-file excluded.txt   # plan only
+./photo-redate.py $B/proton-photos --apply --limit 5             # try a few
+./photo-redate.py $B/proton-photos --apply
 ```
 
 Proton uses `DateTimeOriginal` for the timeline but has no command to edit
-metadata, so the only way is to re-upload a corrected copy.
+metadata, so the only way is to re-upload a corrected copy. `--apply` uses the
+plan you reviewed, and is resumable.
 
-- **Videos don't work**: QuickTime date tags are ignored and the video lands at
-  its upload date. Always use `--skip-video`.
+- **Videos are skipped**: QuickTime date tags are ignored and a re-uploaded
+  video lands at its upload date.
 - **Side effect**: editing an album moves it to the top of the album list on
   Proton, and the order can't be changed.
 
@@ -228,12 +222,12 @@ to change it).
 | File | Written by | Used by |
 |---|---|---|
 | `~/drive-sync-logs/<root>.tsv` (+ `.state`, `.queue`) | `proton-scan.py` | `file-backup.py`, `drive-compare.py`, `proton-orphans.py` |
-| `.proton-photo-inventory.json` | `photo-backup.py` | all photo scripts |
-| `.proton-photo-state.txt` | `photo-backup.py`, `photo-import.py` | `photo-backup.py` |
-| `.proton-photo-map.json` | `photo-fixdate.py` | `album-backup.py`, `photo-prune.py`, `photo-redate.py`, `photo-unlinked.py` |
-| `.proton-albums.json` | `album-backup.py` | `photo-prune.py`, `photo-redate.py`, `photo-reupload.py`, `photo-unlinked.py` |
-| `redate-plan.json` | `photo-redate.py` | `photo-reupload.py` |
-| `prune-state.json`, `reupload-state.json` | `photo-prune.py`, `photo-reupload.py` | the same, to resume |
+| `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
+| `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
+| `.proton-albums.json` | `photo-backup.py --albums` | `photo-prune.py`, `photo-redate.py` |
+| `photos-deleted-locally.txt`, `unrecognized-photos.txt`, `photos-not-downloaded.txt` | `photo-backup.py` | you |
+| `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
+| `prune-state.json` | `photo-prune.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
 | `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py --copy-script` | you, after reviewing it |
 | `~/drive-sync-logs/photos-upload-*.sh` | `photo-compare.py --upload-script` | you, after reviewing it |

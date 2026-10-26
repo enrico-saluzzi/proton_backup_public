@@ -23,8 +23,9 @@ TWO MODES
                    Use --keep-local to keep the local copies.
 
   The uid of each file comes from .proton-photo-map.json, built by
-  photo-fixdate.py on content (sha1): run photo-fixdate.py BEFORE deleting
-  anything, so the map still knows the deleted files.
+  photo-backup.py on content (sha1). photo-backup.py keeps the last known
+  path of photos deleted from the backup, so the order doesn't matter: it
+  also lists them in photos-deleted-locally.txt and suggests this script.
 
 SAFETY
   - dry run by default: nothing happens without --apply
@@ -32,10 +33,8 @@ SAFETY
   - Proton's trash has no expiry, so every deletion stays recoverable
   - resumable: progress is saved in prune-state.json in the backup folder
 
-  After pruning, regenerate inventory, map and albums (without --reuse):
-      ./photo-backup.py DEST --details
-      ./photo-fixdate.py DEST --reorganize
-      ./album-backup.py DEST --album-dir ...
+  After pruning, bring the backup in line (without --reuse-inventory):
+      ./photo-backup.py DEST --albums ...
 
 USAGE
   ./photo-prune.py DEST --from-missing --dry-run
@@ -81,7 +80,7 @@ def main():
     a = parse_args()
     mp = os.path.join(a.dest, PHOTO_MAP)
     if not os.path.exists(mp):
-        sys.exit(f"ERROR: {mp} is missing. Run photo-fixdate.py first.")
+        sys.exit(f"ERROR: {mp} is missing. Run photo-backup.py first.")
     with open(mp, encoding="utf-8") as f:
         photo_map = json.load(f)
     by_path = {}
@@ -214,9 +213,7 @@ def main():
     print("")
     print("  The photos are in Proton's trash, recoverable with no expiry.")
     print("  After checking, regenerate inventory, map and albums:")
-    print("    ./photo-backup.py DEST --details")
-    print("    ./photo-fixdate.py DEST --reorganize")
-    print("    ./album-backup.py DEST --album-dir ...")
+    print("    ./photo-backup.py DEST --albums ...")
     return 1 if errors else 0
 
 
