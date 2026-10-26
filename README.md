@@ -71,9 +71,9 @@ scan; `--reuse-scan` skips it and uses the last complete one.
 
 **Photos.** The Photos section isn't synced by the desktop client and isn't a
 filesystem path: it only exists through the CLI's `photo` and `album` commands,
-which is what the photo scripts use. Photos are always matched to local files
-by **content** (sha1), never by name: the CLI renames duplicates, and identical
-content can exist under several uids.
+which is what the photo scripts use. In the backup, photos are matched to local
+files by **content** (sha1), not by name: the CLI renames duplicates, and
+identical content can exist under several uids.
 
 ---
 
