@@ -33,6 +33,8 @@ synthetic data in a scratch folder, passing `--cli` a small fake
 (`filesystem list/download/trash/rename`, `photo timeline/download/upload`,
 `album list/photos/add-photo`) from a JSON state file.
 `photo-redate.py --apply` also takes `--exiftool`, which can point to a stub.
+Run those tests with `HOME` set to a scratch folder: the Drive scan always
+writes to `~/drive-sync-logs`, where the user's real scans live.
 Exercise the whole chain when a change touches a shared file format.
 
 ## Architecture
@@ -50,8 +52,10 @@ more than one script here instead of copying it.
 Scripts share state through files, so order matters:
 
 ```
-proton-scan.py  -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1, flag)
-                   -> file-backup.py, drive-compare.py, proton-orphans.py
+protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
+                   flag); called by file-backup.py and drive-compare.py at
+                   start. Incomplete scans keep .state/.queue and resume
+                   (within 24 h); complete ones remove them.
 
 photo-backup.py -> .proton-photo-inventory.json (timeline), .proton-photo-state.txt
                    (uids downloaded), .proton-photo-map.json (uid -> local file,
@@ -81,9 +85,11 @@ bearing its own name. `photo-backup.py` rebuilds it on every run and keeps the
 last known path of photos deleted from the backup but still on Proton:
 `photo-prune.py --from-missing` relies on those paths not existing.
 
-There are four photo scripts on purpose, one per user goal (backup, fix
-dates, prune, compare with a local folder). Add options to them rather than
-new scripts.
+There are six scripts on purpose, one per user goal: `file-backup.py` and
+`drive-compare.py` for Drive; `photo-backup.py`, `photo-redate.py`,
+`photo-prune.py` and `photo-compare.py` for Photos. Each runs as a single
+command (the Drive scan is internal). Add options to them rather than new
+scripts, and put logic shared by several of them in `protonlib.py`.
 
 ### Safety conventions to preserve
 

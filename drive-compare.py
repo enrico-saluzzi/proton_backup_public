@@ -3,15 +3,19 @@
 # Copyright (c) 2026 Enrico Saluzzi
 # SPDX-License-Identifier: MIT
 """
-drive-compare.py - Compare a local folder with a Proton Drive inventory.
+drive-compare.py - Compare a local folder with Proton Drive.
 
 WHY
   When migrating to Proton Drive (e.g. from Dropbox), you need to know that
   everything actually arrived before you delete the old copy. This script
-  takes the TSV produced by proton-scan.py and compares it with a local
-  folder. Proton exposes the sha1 of each original file, so with --sha1 the
-  comparison goes down to the CONTENT, without downloading anything from
-  Proton: computing the sha1 locally is enough.
+  scans Proton Drive through the CLI (--root, default /my-files) and compares
+  it with a local folder. Proton exposes the sha1 of each original file, so
+  with --sha1 the comparison goes down to the CONTENT, without downloading
+  anything from Proton: computing the sha1 locally is enough.
+
+  The scan takes seconds even on tens of thousands of files and is saved in
+  ~/drive-sync-logs. If it gets interrupted, run the same command again and
+  it resumes; --reuse-scan skips it and uses the last complete one.
 
 WHAT IT REPORTS
   - files only in the local folder (missing on Proton)
@@ -40,10 +44,10 @@ COPY SCRIPT
   only one ProtonDrive folder it's that one; if there are several (e.g. an
   old copy left by a reset, with a date in its name), it's the one linked
   to the app (the only one with the com.apple.file-provider-domain-id
-  attribute). Otherwise, or if you scanned a subfolder (e.g. /my-files/Work),
-  pass the matching local folder with --proton-folder. As a safety check,
-  the script isn't written if none of the scanned top-level folders exist
-  in the chosen folder.
+  attribute). With --root /my-files/Work the files go in its Work
+  subfolder. If the folder can't be found, pass the local folder matching
+  --root with --proton-folder. As a safety check, the script isn't written
+  if none of the scanned top-level folders exist in the chosen folder.
 
   Review the script, then run it. Files that are empty when it runs are
   skipped (online-only placeholders would be copied empty), files already
@@ -52,15 +56,11 @@ COPY SCRIPT
   finished syncing, scan and compare again to verify.
 
 USAGE
-  ./drive-compare.py ~/Dropbox proton.tsv
-  ./drive-compare.py ~/Dropbox proton.tsv --sha1          # compare content
-  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --label check-$(date +%Y%m) \\
-      --exclude-dirs "Camera Uploads,Photos"
-  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --copy-script
-  ./drive-compare.py ~/Dropbox my-files-Work.tsv --sha1 --copy-script \\
-      --proton-folder ~/Library/CloudStorage/ProtonDrive-you@example.com-folder/Work
+  ./drive-compare.py ~/Dropbox
+  ./drive-compare.py ~/Dropbox --sha1 --exclude-dirs "Camera Uploads,Photos"
+  ./drive-compare.py ~/Dropbox --sha1 --copy-script
+  ./drive-compare.py ~/Dropbox/Work --root /my-files/Work --sha1 --copy-script
 
-  A bare TSV name is looked up in --out-dir, where proton-scan.py writes it.
   --exclude-dirs takes TOP-LEVEL folder names, comma-separated, exact match.
 
 SAFETY
@@ -92,18 +92,22 @@ TO_REVIEW = "TO REVIEW"
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Compare a local folder with a Proton scan.")
+    p = argparse.ArgumentParser(description="Compare a local folder with Proton Drive.")
     p.add_argument("local", help="local folder, e.g. ~/Dropbox")
-    p.add_argument("scan", help="TSV produced by proton-scan.py")
-    p.add_argument("--prefix", default="",
-                   help="prefix to strip from the paths in the scan")
+    p.add_argument("--root", default="/my-files",
+                   help="remote folder to compare with (default /my-files, the whole Drive)")
+    p.add_argument("--reuse-scan", action="store_true",
+                   help="reuse the last complete scan instead of scanning Proton again")
+    p.add_argument("--workers", type=int, default=3,
+                   help="parallel calls while scanning (default 3)")
+    p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
     p.add_argument("--sha1", action="store_true",
                    help="compare content (computes sha1 locally: slower)")
     p.add_argument("--include-online", action="store_true",
                    help="also check online-only files: FORCES THEIR DOWNLOAD")
     p.add_argument("--exclude-dirs", default="",
                    help="top-level local folders to skip, comma-separated (e.g. Code,Work)")
-    p.add_argument("--out-dir", default=os.path.expanduser("~/drive-sync-logs"))
+    p.add_argument("--out-dir", default=protonlib.LOG_DIR)
     p.add_argument("--label", default=None,
                    help="label used in output file names "
                         "(default: name of the local folder)")
@@ -112,19 +116,14 @@ def parse_args():
                    help="also write a script that copies the missing files into the "
                         "folder synced by the Proton Drive app")
     p.add_argument("--proton-folder", default=None,
-                   help="local folder matching the scanned path, used by --copy-script "
-                        "(default: the Proton Drive folder in ~/Library/CloudStorage)")
+                   help="local folder matching --root, used by --copy-script "
+                        "(default: found in ~/Library/CloudStorage)")
     a = p.parse_args()
     a.out_dir = os.path.expanduser(a.out_dir)
     if not a.label:
         a.label = os.path.basename(os.path.expanduser(a.local).rstrip(os.sep)) or "root"
     # no separators or spaces in file names
     a.label = re.sub(r"[^A-Za-z0-9._-]+", "_", a.label).strip("_") or "root"
-    if os.sep not in a.scan:
-        candidate = os.path.join(a.out_dir, a.scan)
-        if os.path.exists(candidate):
-            a.scan = candidate
-    a.scan = os.path.expanduser(a.scan)
     return a
 
 
@@ -198,20 +197,27 @@ def scan_local(root, exclude):
     return files
 
 
-def load_scan(path, prefix):
+def get_scan(a):
+    """Path of an up-to-date, complete scan of a.root."""
+    tsv = protonlib.scan_path(a.root)
+    if a.reuse_scan:
+        if not os.path.exists(tsv) or os.path.exists(tsv + ".state"):
+            sys.exit(f"ERROR: no complete scan of {a.root} to reuse. Run without --reuse-scan.")
+        print(f"  Scan reused: {tsv}")
+        return tsv
+    tsv, errors = protonlib.scan_drive(a.cli, a.root, workers=a.workers)
+    if errors:
+        protonlib.scan_errors_exit(errors)
+    return tsv
+
+
+def load_scan(path):
     remote = {}
     problems = []
-    with open(path, encoding="utf-8", newline="\n") as f:
-        for line in f:
-            parts = line.rstrip("\r\n").split("\t")
-            if len(parts) < 5:
-                continue
-            rel, size, mtime, sha1, flag = parts[0], parts[1], parts[2], parts[3], parts[4]
-            if prefix and rel.startswith(prefix):
-                rel = rel[len(prefix):].lstrip("/")
-            if flag != "-":
-                problems.append((rel, flag))
-            remote[protonlib.nfc(rel)] = (int(size or 0), int(mtime or 0), sha1)
+    for rel, size, mtime, sha1, flag in protonlib.read_scan(path):
+        if flag != "-":
+            problems.append((rel, flag))
+        remote[protonlib.nfc(rel)] = (size, mtime, sha1)
     return remote, problems
 
 
@@ -256,8 +262,7 @@ echo ""
 echo "Copied: $copied   Skipped: $skipped   Already there: $existing   Failed: $failed"
 echo ""
 echo "The Proton Drive app uploads the copied files in the background."
-echo "When it has finished syncing, scan the same remote path again with"
-echo "proton-scan.py, then compare:"
+echo "When it has finished syncing, verify by comparing again:"
 echo {verify}
 [ "$failed" -eq 0 ]
 """
@@ -304,13 +309,21 @@ def write_copy_script(a, local_root, missing, local, remote, stamp):
     if a.proton_folder:
         dest = os.path.expanduser(a.proton_folder).rstrip(os.sep)
     else:
-        dest, err = find_proton_folder()
-        if not dest:
+        base, err = find_proton_folder()
+        if not base:
             print(f"  ERROR: {err}")
             return None
-        print(f"  Proton Drive folder (found automatically): {dest}")
-    if a.prefix:
-        dest = os.path.join(dest, a.prefix.strip("/"))
+        print(f"  Proton Drive folder (found automatically): {base}")
+        # the synced folder is /my-files: a deeper --root is a subfolder of it
+        root = "/" + a.root.strip("/")
+        if root == "/my-files":
+            dest = base
+        elif root.startswith("/my-files/"):
+            dest = os.path.join(base, root[len("/my-files/"):])
+        else:
+            print(f"  ERROR: {a.root} isn't under /my-files: pass the matching local folder "
+                  "with --proton-folder.")
+            return None
     if not os.path.isdir(dest):
         print(f"  ERROR: Proton folder not found: {dest}")
         print("  Find it with: ls ~/Library/CloudStorage/ | grep -i proton")
@@ -320,8 +333,7 @@ def write_copy_script(a, local_root, missing, local, remote, stamp):
     tops = {rel.split("/", 1)[0] for rel in remote}
     if tops and not any(os.path.exists(os.path.join(dest, t)) for t in tops):
         print(f"  ERROR: none of the scanned top-level items is in {dest}.")
-        print("  If you scanned a subfolder (e.g. /my-files/Work), pass the matching")
-        print("  local folder with --proton-folder.")
+        print("  Check --root, or pass the local folder matching it with --proton-folder.")
         return None
     real_dest, real_src = os.path.realpath(dest), os.path.realpath(local_root)
     if (real_dest + os.sep).startswith(real_src + os.sep) or \
@@ -341,7 +353,7 @@ def write_copy_script(a, local_root, missing, local, remote, stamp):
               f"  {dest}",
               "The Proton Drive app, running in the background, then uploads them."]
     verify = shlex.quote(f"    ./drive-compare.py {shlex.quote(local_root)} "
-                         f"{shlex.quote(os.path.basename(a.scan))} --sha1")
+                         f"--root {shlex.quote(a.root)} --sha1")
     path = os.path.join(a.out_dir, f"copy-to-proton-{a.label}-{stamp}.sh")
     with open(path, "w", encoding="utf-8") as f:
         f.write(COPY_SCRIPT.format(
@@ -359,12 +371,14 @@ def main():
     exclude = set(x.strip() for x in a.exclude_dirs.split(",") if x.strip())
 
     print("")
+    tsv = get_scan(a)
+    print("")
     print(f"  LOCAL  : {local_root}" + (f"   (excluded: {', '.join(sorted(exclude))})" if exclude else ""))
-    print(f"  PROTON : {a.scan}")
+    print(f"  PROTON : {a.root}")
     print("")
     print("Reading...")
 
-    remote, problems = load_scan(a.scan, a.prefix)
+    remote, problems = load_scan(tsv)
     local = scan_local(local_root, exclude)
 
     lk, rk = set(local), set(remote)

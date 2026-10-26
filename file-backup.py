@@ -7,31 +7,34 @@ file-backup.py - Incremental backup of Proton Drive files to a local disk.
 
 WHY
   `proton-drive filesystem download -f skip` skips files that already exist
-  by NAME, so it never notices that a file changed. This script uses the TSV
-  produced by proton-scan.py as the reference instead: it knows the size and
-  sha1 of every remote file, so it can tell not only what is missing from the
-  backup but also what changed since last time, and (with --verify) whether a
-  local copy got silently corrupted while keeping the exact same size.
+  by NAME, so it never notices that a file changed. This script first scans
+  Proton Drive and gets the size and sha1 of every remote file, so it can
+  tell not only what is missing from the backup but also what changed since
+  last time, and (with --verify) whether a local copy got silently corrupted
+  while keeping the exact same size.
 
 WHAT IT DOES
-  1. reads the TSV (or regenerates it first with --rescan)
+  1. scans the remote folder (--root, default /my-files) through the CLI:
+     seconds even on tens of thousands of files, where the macOS Drive folder
+     takes hours. The scan is saved in ~/drive-sync-logs; if it gets
+     interrupted, run the same command again and it resumes.
   2. compares it with the files in the backup folder
   3. downloads what is missing and what has a different size
   4. with --verify, recomputes the local sha1 and re-downloads any mismatch
 
   Files are downloaded in batches grouped by destination folder, because the
-  CLI downloads into one folder per invocation. Batches that fail are listed
-  in ~/drive-sync-logs/files-not-downloaded.txt; just rerun the script and it
-  retries only what is still missing.
+  CLI downloads into one folder per call. Batches that fail are listed in
+  ~/drive-sync-logs/files-not-downloaded.txt; just run again and it retries
+  only what is still missing.
 
-  Note: sha1 values in the inventory are those declared by the uploading
-  client (Proton reports `sha1Verified: false`), so --verify confirms that the
-  backup matches what Proton *declares* to hold.
+  Note: Proton reports these hashes as `sha1Verified: false`, i.e. declared by
+  the uploading client, so --verify confirms that the backup matches what
+  Proton *declares* to hold.
 
 USAGE
-  ./file-backup.py /path/to/backup/proton-files
-  ./file-backup.py /path/to/backup/proton-files --rescan --verify   # monthly
+  ./file-backup.py /path/to/backup/proton-files --verify      # monthly
   ./file-backup.py /path/to/backup/proton-files --dry-run
+  ./file-backup.py /path/to/backup/work --root /my-files/Work
 
 SAFETY
   Downloads only. Never modifies or deletes anything on Proton.
@@ -46,89 +49,63 @@ import time
 
 import protonlib
 
-DEFAULT_TSV = os.path.expanduser("~/drive-sync-logs/my-files.tsv")
-
 
 def parse_args():
     p = argparse.ArgumentParser(
         description="Incremental backup of Proton Drive files.")
     p.add_argument("dest", help="backup folder, e.g. /path/to/backup/proton-files")
-    p.add_argument("--tsv", default=DEFAULT_TSV, help=f"reference TSV (default {DEFAULT_TSV})")
-    p.add_argument("--root", default="/my-files", help="remote root (default /my-files)")
-    p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
-    p.add_argument("--rescan", action="store_true",
-                   help="regenerate the TSV with proton-scan.py before comparing")
-    p.add_argument("--scanner", default=None,
-                   help="path to proton-scan.py (default: next to this script)")
+    p.add_argument("--root", default="/my-files",
+                   help="remote folder to back up (default /my-files, the whole Drive)")
     p.add_argument("--verify", action="store_true",
                    help="recompute the sha1 of every local file (slow but safe)")
+    p.add_argument("--reuse-scan", action="store_true",
+                   help="reuse the last complete scan instead of scanning Proton again")
+    p.add_argument("--workers", type=int, default=3,
+                   help="parallel calls while scanning (default 3)")
+    p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
     p.add_argument("--batch", type=int, default=20,
-                   help="files per CLI invocation (default 20)")
-    p.add_argument("--timeout", type=int, default=1800, help="timeout per batch, in seconds")
+                   help="files per download call (default 20)")
+    p.add_argument("--timeout", type=int, default=1800,
+                   help="timeout per download call, in seconds")
     p.add_argument("--dry-run", action="store_true", help="show what would be downloaded")
     p.add_argument("--max-print", type=int, default=25)
     a = p.parse_args()
     a.dest = os.path.expanduser(a.dest)
-    a.tsv = os.path.expanduser(a.tsv)
-
-    # proton-scan.py lives next to this script: looking it up on PATH fails
-    # when these tools aren't installed among the system commands
-    if a.scanner:
-        a.scanner = os.path.expanduser(a.scanner)
-    else:
-        here = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "proton-scan.py")
-        a.scanner = here if os.path.exists(here) else "proton-scan.py"
     return a
 
 
-def load_tsv(path):
+def get_scan(a):
+    """Path of an up-to-date, complete scan of a.root."""
+    tsv = protonlib.scan_path(a.root)
+    if a.reuse_scan:
+        if not os.path.exists(tsv) or os.path.exists(tsv + ".state"):
+            sys.exit(f"ERROR: no complete scan of {a.root} to reuse. Run without --reuse-scan.")
+        print(f"  Scan reused: {tsv}")
+        return tsv
+    tsv, errors = protonlib.scan_drive(a.cli, a.root, workers=a.workers)
+    if errors:
+        protonlib.scan_errors_exit(errors)
+    return tsv
+
+
+def load_remote(tsv):
     remote = {}
-    with open(path, encoding="utf-8", newline="\n") as f:
-        for line in f:
-            parts = line.rstrip("\r\n").split("\t")
-            if len(parts) < 5:
-                continue
-            rel, size, mtime, sha1 = parts[0], parts[1], parts[2], parts[3]
-            if not rel.strip():
-                continue
-            try:
-                size = int(size or 0)
-            except ValueError:
-                size = 0
-            # the normalized key is for comparison; the ORIGINAL path is for
-            # the CLI, which only accepts the exact form Proton stored
-            # (typically NFD on macOS)
-            remote[protonlib.nfc(rel)] = (size, sha1, rel)
+    for rel, size, mtime, sha1, flag in protonlib.read_scan(tsv):
+        # the normalized key is for comparison; the ORIGINAL path is for the
+        # CLI, which only accepts the exact form Proton stored (NFD on macOS)
+        remote[protonlib.nfc(rel)] = (size, sha1, rel)
     return remote
 
 
 def main():
     a = parse_args()
-
-    if a.rescan:
-        print("  Regenerating the remote inventory...")
-        for f in (a.tsv + ".state", a.tsv + ".queue"):
-            if os.path.exists(f):
-                os.remove(f)
-        if not os.path.exists(a.scanner) and os.sep in a.scanner:
-            sys.exit(f"ERROR: {a.scanner} not found. Point at it with --scanner.")
-        r = subprocess.run([sys.executable, a.scanner, a.root, "-o", a.tsv,
-                            "--cli", a.cli,
-                            "--workers", "3", "--delay", "0.2", "--timeout", "300"],
-                           stdin=subprocess.DEVNULL)
-        if r.returncode != 0:
-            print("  WARNING: the scan reported errors: "
-                  "the inventory may be incomplete.")
-
-    if not os.path.exists(a.tsv):
-        sys.exit(f"ERROR: {a.tsv} doesn't exist. Run proton-scan.py first, "
-                 f"or use --rescan.")
+    print("")
+    tsv = get_scan(a)
     os.makedirs(a.dest, exist_ok=True)
 
-    remote = load_tsv(a.tsv)
+    remote = load_remote(tsv)
     print("")
-    print(f"  REMOTE : {a.tsv}  ({len(remote)} files)")
+    print(f"  PROTON : {a.root}  ({len(remote)} files)")
     print(f"  BACKUP : {a.dest}")
     print("")
 
@@ -255,9 +232,8 @@ def main():
     print(f"  Downloaded : {done}")
     print(f"  Failed     : {len(failed)}")
     if failed:
-        logdir = os.path.expanduser("~/drive-sync-logs")
-        os.makedirs(logdir, exist_ok=True)
-        p = os.path.join(logdir, "files-not-downloaded.txt")
+        os.makedirs(protonlib.LOG_DIR, exist_ok=True)
+        p = os.path.join(protonlib.LOG_DIR, "files-not-downloaded.txt")
         with open(p, "w", encoding="utf-8") as f:
             for rel, e in failed:
                 f.write(f"{rel}\t{e}\n")

@@ -24,7 +24,6 @@ a ~36,000-photo library onto an external SSD.
 | Python 3 (`python3 --version`; on macOS it comes with the Command Line Tools) | all Python scripts |
 | The official Proton Drive CLI `proton-drive`, logged in (`proton-drive auth login`) | almost all scripts |
 | `exiftool` (`brew install exiftool`) | `photo-redate.py --apply`; optional for `photo-compare.py` |
-| `fswatch` (`brew install fswatch`) | `protondrive-lockfile-guard.sh` |
 
 Keep all the files in the same folder: the Python scripts import
 `protonlib.py` from next to themselves. Every script has a detailed header and
@@ -38,10 +37,16 @@ Keep all the files in the same folder: the Python scripts import
 
 | Script | What it does |
 |---|---|
-| `proton-scan.py` | Inventory of a Drive tree via the CLI: path, size, date and **sha1** of every file, as a TSV. Parallel, resumable. The input of the next three. |
 | `file-backup.py` | Incremental backup of Drive files to a local disk, with `--verify` to check every local file by content. |
-| `drive-compare.py` | Compares a local folder (e.g. `~/Dropbox`) with the inventory, down to file content, without downloading anything. For verifying a migration. |
-| `proton-orphans.py` | Folders that exist on Proton but no longer locally: candidates for cleanup. |
+| `drive-compare.py` | Compares a local folder (e.g. `~/Dropbox`) with Proton Drive, down to file content, without downloading anything. For verifying a migration; `--copy-script` brings over what's missing. |
+
+Both start by scanning Proton Drive through the CLI: path, size, date and
+**sha1** of every file, in parallel, in seconds even on tens of thousands of
+files (the macOS Drive folder takes hours to enumerate). The scan is saved in
+`~/drive-sync-logs`. If it's interrupted, or some folder can't be read, the
+command stops and resumes the scan when you run it again; `--reuse-scan` skips
+it and uses the last complete one. `--root` picks the remote folder (default
+`/my-files`, the whole Drive).
 
 ### Photos (Proton Photos)
 
@@ -54,12 +59,6 @@ path: it only exists through the CLI's `photo` and `album` commands.
 | `photo-redate.py` | Fixes the date of scanned prints that sit in the wrong year on the timeline, using the year in the album name: first a plan to review, then `--apply` re-uploads corrected copies and trashes the originals. |
 | `photo-prune.py` | Propagates to Proton's trash the photos you deleted from the local backup in Finder. Refuses to empty an album. |
 | `photo-compare.py` | Which photos in one or more local folders (e.g. Dropbox Camera Uploads) are missing from Proton Photos, matched by content or capture time. `--upload-script` uploads the missing ones. |
-
-### Sync client
-
-| Script | What it does |
-|---|---|
-| `protondrive-lockfile-guard.sh` | Quarantines Office/LibreOffice lock files before the macOS File Provider tries to sync them; they were the suspected trigger of multi-hour sync hangs. |
 
 ---
 
@@ -74,11 +73,9 @@ B=/Volumes/MyBackupDisk
 ### Monthly file backup
 
 ```bash
-./file-backup.py $B/proton-files --rescan --verify
+./file-backup.py $B/proton-files --verify
 ```
 
-- `--rescan` reads the inventory from Proton again before comparing. With a
-  stale inventory, normal changes look like data loss.
 - `--verify` recomputes the sha1 of every local file. Do it **every time**: it
   is the only check that catches a corrupted file of the exact same size.
   Expect roughly 20 minutes per 150 GB.
@@ -145,13 +142,12 @@ plan you reviewed, and is resumable.
 ### Verifying a migration (e.g. Dropbox → Proton)
 
 ```bash
-./proton-scan.py /my-files --workers 3 --delay 0.2 --timeout 300
-./drive-compare.py ~/Dropbox my-files.tsv --sha1 --label check-$(date +%Y%m) \
-    --exclude-dirs "Camera Uploads"
+./drive-compare.py ~/Dropbox --sha1 --exclude-dirs "Camera Uploads"
 ```
 
-- Find where the content landed on Proton first
-  (`proton-drive filesystem list /my-files`) and scan that folder.
+- If the content landed in a subfolder on Proton (check with
+  `proton-drive filesystem list /my-files`), compare with that one:
+  `--root /my-files/Dropbox`.
 - `--exclude-dirs` takes top-level folder names, exact match.
 - Make the Dropbox folders **available offline** first: online-only files have
   no local content and can only be listed as "not verified".
@@ -162,7 +158,7 @@ plan you reviewed, and is resumable.
 To bring over what's missing, add `--copy-script`:
 
 ```bash
-./drive-compare.py ~/Dropbox my-files.tsv --sha1 --copy-script
+./drive-compare.py ~/Dropbox --sha1 --copy-script
 ```
 
 It writes `copy-to-proton-<label>-<timestamp>.sh` next to the lists: it copies
@@ -170,21 +166,15 @@ the `TO-REVIEW-local` files into the folder synced by the Proton Drive app, at
 the same relative path they have locally, creating subfolders as needed, and
 the app uploads them in the background. Files already in the Proton folder are
 never overwritten, and the script can be run again safely. It is only written,
-not run: review it, run it, wait for the app to finish syncing, then scan and
-compare again.
+not run: review it, run it, wait for the app to finish syncing, then compare
+again.
 
-The Proton Drive folder is found automatically in `~/Library/CloudStorage`. If
-there are several (e.g. an old copy with a date in its name, left by a sync
-reset), the one linked to the app is used. If you scanned a subfolder, or the
-folder can't be found, pass it explicitly:
-
-```bash
-./drive-compare.py ~/Dropbox my-files-Work.tsv --sha1 --copy-script \
-    --proton-folder ~/Library/CloudStorage/ProtonDrive-you@example.com-folder/Work
-```
-
-As a safety check, the script isn't written if none of the scanned top-level
-folders exist in the chosen folder.
+The Proton Drive folder is found automatically in `~/Library/CloudStorage`
+(with `--root /my-files/Work`, its `Work` subfolder). If there are several
+(e.g. an old copy with a date in its name, left by a sync reset), the one
+linked to the app is used. If it can't be found, pass it with
+`--proton-folder`. As a safety check, the script isn't written if none of the
+scanned top-level folders exist in the chosen folder.
 
 ### Checking a photo folder against Proton Photos (e.g. Camera Uploads)
 
@@ -221,7 +211,7 @@ to change it).
 
 | File | Written by | Used by |
 |---|---|---|
-| `~/drive-sync-logs/<root>.tsv` (+ `.state`, `.queue`) | `proton-scan.py` | `file-backup.py`, `drive-compare.py`, `proton-orphans.py` |
+| `~/drive-sync-logs/<root>.tsv` (the Drive scan; `.state`, `.queue` while incomplete) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
 | `.proton-albums.json` | `photo-backup.py --albums` | `photo-prune.py`, `photo-redate.py` |
