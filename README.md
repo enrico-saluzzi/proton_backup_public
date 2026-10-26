@@ -165,16 +165,23 @@ metadata, so the only way is to re-upload a corrected copy.
   `~/drive-sync-logs` need a decision; the rest is structural noise (macOS
   packages, Icon files, Office lock files).
 
-To upload what's missing, add `--upload-script`:
+To bring over what's missing, add `--copy-script` with the folder synced by
+the Proton Drive app (find it with `ls ~/Library/CloudStorage/ | grep -i proton`):
 
 ```bash
-./drive-compare.py ~/Dropbox my-files.tsv --sha1 --upload-script
+./drive-compare.py ~/Dropbox my-files.tsv --sha1 \
+    --copy-script ~/Library/CloudStorage/ProtonDrive-you@example.com-folder
 ```
 
-It writes `upload-to-proton-<label>-<timestamp>.sh` next to the lists: it
-creates the folders missing on Proton and uploads the `TO-REVIEW-local` files
-with `proton-drive filesystem upload`, never overwriting a remote file. It is
-only written, not run: review it, run it, then scan and compare again.
+It writes `copy-to-proton-<label>-<timestamp>.sh` next to the lists: it copies
+the `TO-REVIEW-local` files into the Proton folder at the same relative path
+they have locally, creating subfolders as needed, and the app uploads them in
+the background. Files already in the Proton folder are never overwritten. The
+script is only written, not run: review it, run it, wait for the app to finish
+syncing, then scan and compare again.
+
+The folder must correspond to the remote path you scanned: the synced folder
+itself for `/my-files`, its `Dropbox` subfolder if you scanned `/my-files/Dropbox`.
 
 ### Checking a photo folder against Proton Photos (e.g. Camera Uploads)
 
@@ -219,7 +226,8 @@ to change it).
 | `redate-plan.json` | `photo-redate.py` | `photo-reupload.py` |
 | `prune-state.json`, `reupload-state.json` | `photo-prune.py`, `photo-reupload.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
-| `~/drive-sync-logs/upload-to-proton-*.sh`, `photos-upload-*.sh` | `drive-compare.py`, `photo-compare.py` with `--upload-script` | you, after reviewing them |
+| `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py --copy-script` | you, after reviewing it |
+| `~/drive-sync-logs/photos-upload-*.sh` | `photo-compare.py --upload-script` | you, after reviewing it |
 
 Photo files live in the photo backup folder; Drive inventories, comparison
 lists and upload scripts in `~/drive-sync-logs`.

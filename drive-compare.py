@@ -29,32 +29,36 @@ WHAT IT REPORTS
   Full lists are written to --out-dir (default ~/drive-sync-logs) as
   <list>-<label>-<timestamp>.txt.
 
-UPLOAD SCRIPT
-  With --upload-script it also writes upload-to-proton-<label>-<timestamp>.sh:
-  a bash script that uploads the TO-REVIEW local files (missing on Proton)
-  with `proton-drive filesystem upload`, into the same folder structure
-  under --remote-root (the path that was scanned, default /my-files).
-  Folders missing on Proton are created first; existing ones are addressed
-  with the exact name Proton stores (NFD), which the CLI requires.
+COPY SCRIPT
+  With --copy-script PROTON_FOLDER it also writes
+  copy-to-proton-<label>-<timestamp>.sh: a bash script that copies the
+  TO-REVIEW local files (missing on Proton) into the folder synced by the
+  Proton Drive app, at the same relative path they have locally, creating
+  subfolders as needed. The app then uploads them in the background.
+
+  PROTON_FOLDER is the local folder that corresponds to the remote path you
+  scanned: for /my-files it's the synced folder itself, usually
+  ~/Library/CloudStorage/ProtonDrive-<account>-folder.
 
   Review the script, then run it. Files that are empty when it runs are
-  skipped (online-only placeholders would be uploaded empty), existing
-  remote files are never overwritten (-f skip), and noise files (macOS
-  package contents, lock files, ...) are not included. Afterwards, scan and
-  compare again to verify.
+  skipped (online-only placeholders would be copied empty), files already
+  in the Proton folder are never overwritten, and noise files (macOS
+  package contents, lock files, ...) are not included. When the app has
+  finished syncing, scan and compare again to verify.
 
 USAGE
   ./drive-compare.py ~/Dropbox proton.tsv
   ./drive-compare.py ~/Dropbox proton.tsv --sha1          # compare content
   ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --label check-$(date +%Y%m) \\
       --exclude-dirs "Camera Uploads,Photos"
-  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --upload-script
+  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 \\
+      --copy-script ~/Library/CloudStorage/ProtonDrive-you@example.com-folder
 
   A bare TSV name is looked up in --out-dir, where proton-scan.py writes it.
   --exclude-dirs takes TOP-LEVEL folder names, comma-separated, exact match.
 
 SAFETY
-  Read-only. Doesn't copy, modify or delete anything: the upload script is
+  Read-only. Doesn't copy, modify or delete anything: the copy script is
   only written, never run. Note that --include-online FORCES the download
   of online-only files to read them.
 """
@@ -97,15 +101,9 @@ def parse_args():
                    help="label used in output file names "
                         "(default: name of the local folder)")
     p.add_argument("--max-print", type=int, default=30)
-    p.add_argument("--upload-script", action="store_true",
-                   help="also write a script that uploads the missing files to Proton")
-    p.add_argument("--remote-root", default="/my-files",
-                   help="the remote path that was scanned, used by --upload-script "
-                        "(default /my-files)")
-    p.add_argument("--cli", default=protonlib.DEFAULT_CLI,
-                   help="CLI binary written into the upload script")
-    p.add_argument("--batch", type=int, default=20,
-                   help="files per upload command in the upload script (default 20)")
+    p.add_argument("--copy-script", default=None, metavar="PROTON_FOLDER",
+                   help="also write a script that copies the missing files into this "
+                        "folder synced by the Proton Drive app")
     a = p.parse_args()
     a.out_dir = os.path.expanduser(a.out_dir)
     if not a.label:
@@ -191,14 +189,8 @@ def scan_local(root, exclude):
 
 
 def load_scan(path, prefix):
-    """Remote files, problematic nodes, and remote folders.
-
-    remote_dirs maps the NFC form of every remote folder (relative path) to
-    the form Proton stores, which is the only one the CLI accepts.
-    """
     remote = {}
     problems = []
-    remote_dirs = {}
     with open(path, encoding="utf-8", newline="\n") as f:
         for line in f:
             parts = line.rstrip("\r\n").split("\t")
@@ -210,81 +202,92 @@ def load_scan(path, prefix):
             if flag != "-":
                 problems.append((rel, flag))
             remote[protonlib.nfc(rel)] = (int(size or 0), int(mtime or 0), sha1)
-            d = os.path.dirname(rel)
-            while d:
-                remote_dirs.setdefault(protonlib.nfc(d), d)
-                d = os.path.dirname(d)
-    return remote, problems, remote_dirs
+    return remote, problems
 
 
-def escape_name(name):
-    """A name as a CLI path component: '/' inside names must be escaped."""
-    return name.replace("/", "\\/")
+COPY_SCRIPT = """#!/bin/bash
+{header}
+#
+# Review this file before running it: nothing has been copied yet.
+# Files already in the Proton folder are never overwritten. Files that are
+# empty at run time are skipped: an online-only placeholder (0 bytes) would
+# otherwise be copied as an empty file. Make the source folders available
+# offline first.
+
+DEST={dest}
+copied=0; skipped=0; existing=0; failed=0
+
+if [ ! -d "$DEST" ]; then
+    echo "Proton Drive folder not found: $DEST"
+    echo "Check the path (ls ~/Library/CloudStorage/) and generate the script again."
+    exit 1
+fi
+
+# copy_file SOURCE DESTINATION
+copy_file() {{
+    if [ ! -s "$1" ]; then
+        echo "  skipped, empty or missing (online-only?): $1"
+        skipped=$((skipped + 1))
+    elif [ -e "$2" ]; then
+        echo "  skipped, already in the Proton folder: $2"
+        existing=$((existing + 1))
+    elif mkdir -p "$(dirname "$2")" && cp -p "$1" "$2"; then
+        copied=$((copied + 1))
+        [ $((copied % 50)) -eq 0 ] && echo "  $copied copied..."
+    else
+        echo "  FAILED: $1"
+        failed=$((failed + 1))
+    fi
+}}
+
+{calls}
+
+echo ""
+echo "Copied: $copied   Skipped: $skipped   Already there: $existing   Failed: $failed"
+echo ""
+echo "The Proton Drive app uploads the copied files in the background."
+echo "When it has finished syncing, scan the same remote path again with"
+echo "proton-scan.py, then compare:"
+echo {verify}
+[ "$failed" -eq 0 ]
+"""
 
 
-def upload_plan(missing, local, local_root, remote_dirs, remote_base):
-    """Folders to create and files to upload, grouped by remote folder.
-
-    Existing remote folders are addressed with the form Proton stores;
-    missing ones are created level by level with the local names.
-    """
-    to_create = []          # (remote parent, name), parents first
-    created = {}            # NFC relative path -> remote path
-    by_parent = {}          # remote parent -> [local files]
-    for rel in missing:
-        full = local[rel][2]
-        comps = os.path.relpath(full, local_root).split(os.sep)[:-1]
-        current = remote_base
-        for i in range(len(comps)):
-            key = protonlib.nfc("/".join(comps[:i + 1]))
-            if key in remote_dirs:
-                current = remote_base + "/" + "/".join(
-                    escape_name(c) for c in remote_dirs[key].split("/"))
-            elif key in created:
-                current = created[key]
-            else:
-                to_create.append((current, comps[i]))
-                current = current + "/" + escape_name(comps[i])
-                created[key] = current
-        by_parent.setdefault(current, []).append(full)
-    return to_create, by_parent
-
-
-def write_upload_script(a, local_root, missing, local, remote_dirs, stamp):
-    remote_base = a.remote_root.rstrip("/")
+def write_copy_script(a, local_root, missing, local, stamp):
+    """Write the copy script; return its path, or None if the folder is unusable."""
+    dest = os.path.expanduser(a.copy_script).rstrip(os.sep)
     if a.prefix:
-        remote_base += "/" + a.prefix.strip("/")
-    to_create, by_parent = upload_plan(missing, local, local_root, remote_dirs, remote_base)
+        dest = os.path.join(dest, a.prefix.strip("/"))
+    if not os.path.isdir(dest):
+        print(f"  ERROR: Proton folder not found: {dest}")
+        print("  Find it with: ls ~/Library/CloudStorage/ | grep -i proton")
+        return None
+    real_dest, real_src = os.path.realpath(dest), os.path.realpath(local_root)
+    if (real_dest + os.sep).startswith(real_src + os.sep) or \
+            (real_src + os.sep).startswith(real_dest + os.sep):
+        print("  ERROR: the Proton folder and the local folder overlap.")
+        return None
 
-    calls = [f"mkdir_remote {shlex.quote(parent)} {shlex.quote(name)}"
-             for parent, name in to_create]
-    for parent in sorted(by_parent):
-        files = sorted(by_parent[parent])
-        for i in range(0, len(files), a.batch):
-            calls.append([parent] + files[i:i + a.batch])
-
-    mkdir_fn = (
-        "\n# mkdir_remote PARENT NAME: create a remote folder (an error just means\n"
-        "# it already exists, which is fine)\n"
-        "mkdir_remote() {\n"
-        '    echo "  folder: $1/$2"\n'
-        '    "$CLI" filesystem create-folder "$1" "$2" < /dev/null > /dev/null 2>&1 || true\n'
-        "}\n")
-    path = os.path.join(a.out_dir, f"upload-to-proton-{a.label}-{stamp}.sh")
-    protonlib.write_upload_script(
-        path, a.cli,
-        header=[f"Generated by drive-compare.py on {protonlib.generated_on()}.",
-                f"Uploads to Proton Drive the {len(missing)} files found only in",
-                f"{local_root} (the TO-REVIEW local list), under {remote_base}.",
-                f"Folders to create first: {len(to_create)}.",
-                "Existing remote files are never overwritten (-f skip)."],
-        upload_cmd='"$CLI" filesystem upload -f skip -d merge "${files[@]}" "$dest"',
-        calls=calls,
-        verify=[f"./proton-scan.py {a.remote_root} --workers 3 --delay 0.2 --timeout 300",
-                f"./drive-compare.py {shlex.quote(local_root)} "
-                f"{shlex.quote(os.path.basename(a.scan))} --sha1"],
-        functions=mkdir_fn)
-    return path, len(to_create)
+    calls = []
+    for rel in sorted(missing):
+        src = local[rel][2]
+        dst = os.path.join(dest, os.path.relpath(src, local_root))
+        calls.append(f"copy_file {shlex.quote(src)} {shlex.quote(dst)}")
+    header = [f"Generated by drive-compare.py on {protonlib.generated_on()}.",
+              f"Copies into the Proton Drive folder the {len(missing)} files found only in",
+              f"  {local_root}",
+              "(the TO-REVIEW local list), keeping the same relative paths under",
+              f"  {dest}",
+              "The Proton Drive app, running in the background, then uploads them."]
+    verify = shlex.quote(f"    ./drive-compare.py {shlex.quote(local_root)} "
+                         f"{shlex.quote(os.path.basename(a.scan))} --sha1")
+    path = os.path.join(a.out_dir, f"copy-to-proton-{a.label}-{stamp}.sh")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(COPY_SCRIPT.format(
+            header="\n".join("# " + h for h in header),
+            dest=shlex.quote(dest), calls="\n".join(calls), verify=verify))
+    os.chmod(path, 0o755)
+    return path
 
 
 def main():
@@ -300,7 +303,7 @@ def main():
     print("")
     print("Reading...")
 
-    remote, problems, remote_dirs = load_scan(a.scan, a.prefix)
+    remote, problems = load_scan(a.scan, a.prefix)
     local = scan_local(local_root, exclude)
 
     lk, rk = set(local), set(remote)
@@ -453,21 +456,21 @@ def main():
         for p in written:
             print("   " + p)
 
-    if a.upload_script:
+    if a.copy_script:
         missing = gl.get(TO_REVIEW, [])
         print("")
         if not missing:
-            print("  Upload script: nothing to upload (no TO-REVIEW local files).")
+            print("  Copy script: nothing to copy (no TO-REVIEW local files).")
         else:
-            path, n_dirs = write_upload_script(a, local_root, missing, local,
-                                               remote_dirs, stamp)
-            empty = sum(1 for r in missing if local[r][0] == 0)
-            print(f"  Upload script: {path}")
-            print(f"    {len(missing)} files to upload, {n_dirs} folders to create on Proton.")
-            if empty:
-                print(f"    {empty} of them are 0 bytes locally (probably online-only):")
-                print("    make them available offline first, or they'll be skipped.")
-            print("    Review it, run it, then scan and compare again to verify.")
+            path = write_copy_script(a, local_root, missing, local, stamp)
+            if path:
+                empty = sum(1 for r in missing if local[r][0] == 0)
+                print(f"  Copy script: {path}")
+                print(f"    {len(missing)} files to copy into the Proton Drive folder.")
+                if empty:
+                    print(f"    {empty} of them are 0 bytes locally (probably online-only):")
+                    print("    make them available offline first, or they'll be skipped.")
+                print("    Review it, run it, wait for the app to sync, then verify.")
 
     if a.sha1 and checked:
         print("")
