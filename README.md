@@ -92,9 +92,9 @@ In the examples, `B` is the backup disk:
 B=/Volumes/MyBackupDisk
 ```
 
-### Backing up
+### Files (Proton Drive)
 
-#### Drive files, every month
+#### Monthly backup
 
 ```bash
 ./file-backup.py $B/proton-files --verify
@@ -108,67 +108,10 @@ Note: Proton reports these hashes as `sha1Verified: false`, i.e. declared by
 the uploading client, not recomputed by the servers. `--verify` confirms the
 backup matches what Proton *declares* to hold.
 
-#### Photos, every month
+#### Migrating from another cloud (e.g. Dropbox)
 
-```bash
-./photo-backup.py $B/proton-photos --albums --album-dir $B/proton-albums
-```
-
-The result is two views of the same photos: `proton-photos/<year>/` in
-chronological order, and `proton-albums/<album>/` organized like on Proton.
-
-- Downloads go in batches of 5: bigger batches time out often on large
-  libraries, and every timeout wastes the whole batch.
-- The summary reports, with a full list next to the photos:
-  - photos **deleted from the backup but still on Proton**: deleted on
-    purpose, see *Pruning photos*; by accident, run again with
-    `--redownload-missing`;
-  - **local files that match no Proton photo** (`unrecognized-photos.txt`).
-- Photos that can't be downloaded through the CLI (typically iOS edits,
-  `_modified`) can be downloaded by hand from the web interface and added with
-  `--import ~/Downloads`.
-
-### Maintaining Photos
-
-#### Pruning photos
-
-Delete the photos you don't want **from the backup, in Finder**, looking at
-them (the macOS Trash is your safety net). Then:
-
-```bash
-./photo-prune.py $B/proton-photos --from-missing --dry-run
-./photo-prune.py $B/proton-photos --from-missing --apply
-```
-
-Then run the monthly photo backup again. Proton's trash has no expiry.
-
-#### Fixing dates of scanned photos
-
-Prints scanned years later have a capture date that is technically right but
-semantically wrong: a 2003 event shows up in 2019. If your albums are named
-starting with the year (`2003 - Holiday in Rome`), the albums know better:
-
-```bash
-./photo-redate.py $B/proton-photos --exclude-file excluded.txt   # plan only
-./photo-redate.py $B/proton-photos --apply --limit 5             # try a few
-./photo-redate.py $B/proton-photos --apply
-```
-
-Proton uses `DateTimeOriginal` for the timeline but has no command to edit
-metadata, so the only way is to re-upload a corrected copy. `--apply` uses the
-plan you reviewed, and is resumable.
-
-- **Videos are skipped**: QuickTime date tags are ignored and a re-uploaded
-  video lands at its upload date.
-- **Side effect**: editing an album moves it to the top of the album list on
-  Proton, and the order can't be changed.
-
-### Migrating from another cloud (e.g. Dropbox)
-
-Before deleting the old copy, check that everything arrived: files against
-Drive, the camera folder against Photos.
-
-#### Files
+Before deleting the old copy, check that every file arrived on Drive (for the
+camera folder, see *Photos* below).
 
 ```bash
 ./drive-compare.py ~/Dropbox --sha1 --exclude-dirs "Camera Uploads"
@@ -205,7 +148,62 @@ linked to the app is used. If it can't be found, pass it with
 `--proton-folder`. As a safety check, the script isn't written if none of the
 scanned top-level folders exist in the chosen folder.
 
-#### Photos (e.g. Camera Uploads)
+### Photos (Proton Photos)
+
+#### Monthly backup
+
+```bash
+./photo-backup.py $B/proton-photos --albums --album-dir $B/proton-albums
+```
+
+The result is two views of the same photos: `proton-photos/<year>/` in
+chronological order, and `proton-albums/<album>/` organized like on Proton.
+
+- Downloads go in batches of 5: bigger batches time out often on large
+  libraries, and every timeout wastes the whole batch.
+- The summary reports, with a full list next to the photos:
+  - photos **deleted from the backup but still on Proton**: deleted on
+    purpose, see *Pruning photos*; by accident, run again with
+    `--redownload-missing`;
+  - **local files that match no Proton photo** (`unrecognized-photos.txt`).
+- Photos that can't be downloaded through the CLI (typically iOS edits,
+  `_modified`) can be downloaded by hand from the web interface and added with
+  `--import ~/Downloads`.
+
+#### Pruning photos
+
+Delete the photos you don't want **from the backup, in Finder**, looking at
+them (the macOS Trash is your safety net). Then:
+
+```bash
+./photo-prune.py $B/proton-photos --from-missing --dry-run
+./photo-prune.py $B/proton-photos --from-missing --apply
+```
+
+Then run the monthly photo backup again. Proton's trash has no expiry.
+
+#### Fixing dates of scanned photos
+
+Prints scanned years later have a capture date that is technically right but
+semantically wrong: a 2003 event shows up in 2019. If your albums are named
+starting with the year (`2003 - Holiday in Rome`), the albums know better:
+
+```bash
+./photo-redate.py $B/proton-photos --exclude-file excluded.txt   # plan only
+./photo-redate.py $B/proton-photos --apply --limit 5             # try a few
+./photo-redate.py $B/proton-photos --apply
+```
+
+Proton uses `DateTimeOriginal` for the timeline but has no command to edit
+metadata, so the only way is to re-upload a corrected copy. `--apply` uses the
+plan you reviewed, and is resumable.
+
+- **Videos are skipped**: QuickTime date tags are ignored and a re-uploaded
+  video lands at its upload date.
+- **Side effect**: editing an album moves it to the top of the album list on
+  Proton, and the order can't be changed.
+
+#### Migrating from another cloud (e.g. Camera Uploads)
 
 Typical case: a Dropbox `Camera Uploads` folder, while the same phone also
 synced its photos to Proton Photos. Exclude that folder from `drive-compare.py`
