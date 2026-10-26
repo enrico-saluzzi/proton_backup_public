@@ -49,31 +49,38 @@ a ~36,000-photo library onto an external SSD.
 
 ## At a glance
 
-Six scripts, one per task. Each runs as a single command and does everything it
-needs by itself.
+Six scripts, one per task: two for Drive files, four for Photos. Each runs as a
+single command and does everything it needs by itself.
+
+### Files (Proton Drive)
 
 | I want to... | Script |
 |---|---|
 | back up my Drive files to a local disk | `file-backup.py` |
+| check that a local folder (e.g. Dropbox) is all on Drive, and copy over what's missing | `drive-compare.py --copy-script` |
+
+Both start by scanning Proton Drive through the CLI: path, size, date and
+**sha1** of every file, in parallel, in seconds even on tens of thousands of
+files (the macOS Drive folder takes hours to enumerate). `--root` picks the
+remote folder (default `/my-files`, the whole Drive). The scan is saved in
+`~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
+command stops, and running it again resumes the scan; `--reuse-scan` skips it
+and uses the last complete one.
+
+### Photos (Proton Photos)
+
+| I want to... | Script |
+|---|---|
 | back up my Photos, in year folders and albums | `photo-backup.py --albums` |
 | delete photos by browsing the backup, then trash them on Proton too | `photo-prune.py` |
 | fix the date of scanned prints that sit in the wrong year | `photo-redate.py`, then `--apply` |
-| check that a local folder (e.g. Dropbox) is all on Drive, and copy over what's missing | `drive-compare.py --copy-script` |
 | check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | `photo-compare.py --upload-script` |
 
-**Drive.** `file-backup.py` and `drive-compare.py` start by scanning Proton
-Drive through the CLI: path, size, date and **sha1** of every file, in parallel,
-in seconds even on tens of thousands of files (the macOS Drive folder takes
-hours to enumerate). `--root` picks the remote folder (default `/my-files`, the
-whole Drive). The scan is saved in `~/drive-sync-logs`: if it's interrupted or
-some folder can't be read, the command stops, and running it again resumes the
-scan; `--reuse-scan` skips it and uses the last complete one.
-
-**Photos.** The Photos section isn't synced by the desktop client and isn't a
-filesystem path: it only exists through the CLI's `photo` and `album` commands,
-which is what the photo scripts use. In the backup, photos are matched to local
-files by **content** (sha1), not by name: the CLI renames duplicates, and
-identical content can exist under several uids.
+The Photos section isn't synced by the desktop client and isn't a filesystem
+path: it only exists through the CLI's `photo` and `album` commands, which is
+what these scripts use. In the backup, photos are matched to local files by
+**content** (sha1), not by name: the CLI renames duplicates, and identical
+content can exist under several uids.
 
 ---
 
