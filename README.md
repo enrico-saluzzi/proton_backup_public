@@ -59,6 +59,7 @@ path: it only exists through the CLI's `photo` and `album` commands.
 | `photo-import.py` | Adds to the backup photos you had to download by hand from the web interface. |
 | `photo-unlinked.py` | Diagnostic: Proton photos with no matching local file, and why. |
 | `photo-unrecognized.py` | Diagnostic: local files whose content matches no photo on Proton. |
+| `photo-compare.py` | Which photos in one or more local folders (e.g. Dropbox Camera Uploads) are missing from Proton Photos, matched by content or capture time. Can write an upload script for the missing ones. |
 
 ### Sync client
 
@@ -164,6 +165,46 @@ metadata, so the only way is to re-upload a corrected copy.
   `~/drive-sync-logs` need a decision; the rest is structural noise (macOS
   packages, Icon files, Office lock files).
 
+To upload what's missing, add `--upload-script`:
+
+```bash
+./drive-compare.py ~/Dropbox my-files.tsv --sha1 --upload-script
+```
+
+It writes `upload-to-proton-<label>-<timestamp>.sh` next to the lists: it
+creates the folders missing on Proton and uploads the `TO-REVIEW-local` files
+with `proton-drive filesystem upload`, never overwriting a remote file. It is
+only written, not run: review it, run it, then scan and compare again.
+
+### Checking a photo folder against Proton Photos (e.g. Camera Uploads)
+
+Typical case: a Dropbox `Camera Uploads` folder, while the same phone also
+synced its photos to Proton Photos. Exclude that folder from `drive-compare.py`
+and check it against the Photos section instead:
+
+```bash
+./photo-compare.py ~/Dropbox/"Camera Uploads" --upload-script
+```
+
+Names can't be compared (Dropbox renames uploads after their capture time,
+the phone uploads `IMG_1234.HEIC`), and the bytes often differ too. So photos
+are matched by **identical content** when the file is on disk, otherwise by
+**capture time** (from the Dropbox file name, which works even on online-only
+placeholders, or from EXIF), one Proton photo per local file, same kind
+(photo/video). Times without a zone are read in this Mac's time zone (`--tz`
+to change it).
+
+- Each missing photo comes with a reason. "The Proton photo at that time
+  matches another local file" means two local photos share the same second
+  (a burst, or a duplicate made by Dropbox): worth a look.
+- When in doubt a photo is reported missing: re-uploading costs at worst a
+  duplicate, missing it costs the photo. Photos taken in another time zone
+  may show up as missing for the same reason.
+- The upload script uses `photo upload -c rename` and skips files that are
+  empty when it runs: make the folder **available offline** before running it.
+- The Proton timeline is saved in `~/drive-sync-logs`; pass it back with
+  `--inventory` to avoid reading it again while you iterate.
+
 ---
 
 ## Files the scripts write
@@ -177,9 +218,11 @@ metadata, so the only way is to re-upload a corrected copy.
 | `.proton-albums.json` | `album-backup.py` | `photo-prune.py`, `photo-redate.py`, `photo-reupload.py`, `photo-unlinked.py` |
 | `redate-plan.json` | `photo-redate.py` | `photo-reupload.py` |
 | `prune-state.json`, `reupload-state.json` | `photo-prune.py`, `photo-reupload.py` | the same, to resume |
+| `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
+| `~/drive-sync-logs/upload-to-proton-*.sh`, `photos-upload-*.sh` | `drive-compare.py`, `photo-compare.py` with `--upload-script` | you, after reviewing them |
 
-Photo files live in the photo backup folder; Drive inventories and comparison
-lists in `~/drive-sync-logs`.
+Photo files live in the photo backup folder; Drive inventories, comparison
+lists and upload scripts in `~/drive-sync-logs`.
 
 ---
 
