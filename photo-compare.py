@@ -40,7 +40,7 @@ RESULT
   Lists are written to --out-dir (default ~/drive-sync-logs). The Proton
   timeline is read with `photo timeline -d -j` and saved there too; pass it
   back with --inventory to skip reading it again. A photo backup made with
-  photo-backup.py --details has one ready: .proton-photo-inventory.json.
+  photo-backup.py has one ready: .proton-photo-inventory.json.
 
 UPLOAD SCRIPT
   With --upload-script it also writes photos-upload-<label>-<timestamp>.sh,
