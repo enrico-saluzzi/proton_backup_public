@@ -17,48 +17,63 @@ a ~36,000-photo library onto an external SSD.
 
 ---
 
-## Requirements
+## Getting started
 
-| What | Needed by |
+1. Get the scripts, with git or as a ZIP (green **Code** button → **Download ZIP**
+   on the repository page):
+
+   ```bash
+   git clone https://github.com/nick123421/proton_backup_public.git
+   cd proton_backup_public
+   ```
+
+   Keep all the files together: the scripts import `protonlib.py` from next to
+   themselves.
+
+2. Install the official Proton Drive CLI, `proton-drive`, and log in:
+
+   ```bash
+   proton-drive auth login
+   ```
+
+3. Run any script with `--help`: each one also has a detailed header
+   explaining why it exists, what it does and what it can touch.
+
+| Requirement | Needed by |
 |---|---|
-| Python 3 (`python3 --version`; on macOS it comes with the Command Line Tools) | all Python scripts |
-| The official Proton Drive CLI `proton-drive`, logged in (`proton-drive auth login`) | almost all scripts |
+| Python 3.9 or later (`python3 --version`; on macOS it comes with the Command Line Tools) | all scripts |
+| The Proton Drive CLI `proton-drive`, logged in | all scripts |
 | `exiftool` (`brew install exiftool`) | `photo-redate.py --apply`; optional for `photo-compare.py` |
-
-Keep all the files in the same folder: the Python scripts import
-`protonlib.py` from next to themselves. Every script has a detailed header and
-`--help`.
 
 ---
 
-## The scripts
+## At a glance
 
-### Files (Proton Drive)
+Six scripts, one per task. Each runs as a single command and does everything it
+needs by itself.
 
-| Script | What it does |
+| I want to... | Script |
 |---|---|
-| `file-backup.py` | Incremental backup of Drive files to a local disk, with `--verify` to check every local file by content. |
-| `drive-compare.py` | Compares a local folder (e.g. `~/Dropbox`) with Proton Drive, down to file content, without downloading anything. For verifying a migration; `--copy-script` brings over what's missing. |
+| back up my Drive files to a local disk | `file-backup.py` |
+| back up my Photos, in year folders and albums | `photo-backup.py --albums` |
+| delete photos by browsing the backup, then trash them on Proton too | `photo-prune.py` |
+| fix the date of scanned prints that sit in the wrong year | `photo-redate.py`, then `--apply` |
+| check that a local folder (e.g. Dropbox) is all on Drive, and copy over what's missing | `drive-compare.py --copy-script` |
+| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | `photo-compare.py --upload-script` |
 
-Both start by scanning Proton Drive through the CLI: path, size, date and
-**sha1** of every file, in parallel, in seconds even on tens of thousands of
-files (the macOS Drive folder takes hours to enumerate). The scan is saved in
-`~/drive-sync-logs`. If it's interrupted, or some folder can't be read, the
-command stops and resumes the scan when you run it again; `--reuse-scan` skips
-it and uses the last complete one. `--root` picks the remote folder (default
-`/my-files`, the whole Drive).
+**Drive.** `file-backup.py` and `drive-compare.py` start by scanning Proton
+Drive through the CLI: path, size, date and **sha1** of every file, in parallel,
+in seconds even on tens of thousands of files (the macOS Drive folder takes
+hours to enumerate). `--root` picks the remote folder (default `/my-files`, the
+whole Drive). The scan is saved in `~/drive-sync-logs`: if it's interrupted or
+some folder can't be read, the command stops, and running it again resumes the
+scan; `--reuse-scan` skips it and uses the last complete one.
 
-### Photos (Proton Photos)
-
-The Photos section isn't synced by the desktop client and isn't a filesystem
-path: it only exists through the CLI's `photo` and `album` commands.
-
-| Script | What it does |
-|---|---|
-| `photo-backup.py` | Incremental backup of the Photos section into **one folder per capture year**, with correct file dates; every download confirmed by sha1. `--albums` also rebuilds every album as a folder of **hard links**: a second, album-based view of the same files, using no extra space. Reports photos deleted from the backup and local files that match nothing on Proton. |
-| `photo-redate.py` | Fixes the date of scanned prints that sit in the wrong year on the timeline, using the year in the album name: first a plan to review, then `--apply` re-uploads corrected copies and trashes the originals. |
-| `photo-prune.py` | Propagates to Proton's trash the photos you deleted from the local backup in Finder. Refuses to empty an album. |
-| `photo-compare.py` | Which photos in one or more local folders (e.g. Dropbox Camera Uploads) are missing from Proton Photos, matched by content or capture time. `--upload-script` uploads the missing ones. |
+**Photos.** The Photos section isn't synced by the desktop client and isn't a
+filesystem path: it only exists through the CLI's `photo` and `album` commands,
+which is what the photo scripts use. In the backup, photos are matched to local
+files by **content** (sha1), not by name: the CLI renames duplicates, and
+identical content can exist under several uids.
 
 ---
 
@@ -70,7 +85,9 @@ In the examples, `B` is the backup disk:
 B=/Volumes/MyBackupDisk
 ```
 
-### Monthly file backup
+### Backing up
+
+#### Drive files, every month
 
 ```bash
 ./file-backup.py $B/proton-files --verify
@@ -84,7 +101,7 @@ Note: Proton reports these hashes as `sha1Verified: false`, i.e. declared by
 the uploading client, not recomputed by the servers. `--verify` confirms the
 backup matches what Proton *declares* to hold.
 
-### Monthly photo backup
+#### Photos, every month
 
 ```bash
 ./photo-backup.py $B/proton-photos --albums --album-dir $B/proton-albums
@@ -93,8 +110,6 @@ backup matches what Proton *declares* to hold.
 The result is two views of the same photos: `proton-photos/<year>/` in
 chronological order, and `proton-albums/<album>/` organized like on Proton.
 
-- Photos are matched to local files by **content**, never by name: the CLI
-  renames duplicates, and identical content can exist under several uids.
 - Downloads go in batches of 5: bigger batches time out often on large
   libraries, and every timeout wastes the whole batch.
 - The summary reports, with a full list next to the photos:
@@ -106,7 +121,9 @@ chronological order, and `proton-albums/<album>/` organized like on Proton.
   `_modified`) can be downloaded by hand from the web interface and added with
   `--import ~/Downloads`.
 
-### Pruning photos
+### Maintaining Photos
+
+#### Pruning photos
 
 Delete the photos you don't want **from the backup, in Finder**, looking at
 them (the macOS Trash is your safety net). Then:
@@ -118,7 +135,7 @@ them (the macOS Trash is your safety net). Then:
 
 Then run the monthly photo backup again. Proton's trash has no expiry.
 
-### Fixing dates of scanned photos
+#### Fixing dates of scanned photos
 
 Prints scanned years later have a capture date that is technically right but
 semantically wrong: a 2003 event shows up in 2019. If your albums are named
@@ -139,7 +156,12 @@ plan you reviewed, and is resumable.
 - **Side effect**: editing an album moves it to the top of the album list on
   Proton, and the order can't be changed.
 
-### Verifying a migration (e.g. Dropbox → Proton)
+### Migrating from another cloud (e.g. Dropbox)
+
+Before deleting the old copy, check that everything arrived: files against
+Drive, the camera folder against Photos.
+
+#### Files
 
 ```bash
 ./drive-compare.py ~/Dropbox --sha1 --exclude-dirs "Camera Uploads"
@@ -176,7 +198,7 @@ linked to the app is used. If it can't be found, pass it with
 `--proton-folder`. As a safety check, the script isn't written if none of the
 scanned top-level folders exist in the chosen folder.
 
-### Checking a photo folder against Proton Photos (e.g. Camera Uploads)
+#### Photos (e.g. Camera Uploads)
 
 Typical case: a Dropbox `Camera Uploads` folder, while the same phone also
 synced its photos to Proton Photos. Exclude that folder from `drive-compare.py`
