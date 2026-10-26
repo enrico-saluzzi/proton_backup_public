@@ -165,23 +165,32 @@ metadata, so the only way is to re-upload a corrected copy.
   `~/drive-sync-logs` need a decision; the rest is structural noise (macOS
   packages, Icon files, Office lock files).
 
-To bring over what's missing, add `--copy-script` with the folder synced by
-the Proton Drive app (find it with `ls ~/Library/CloudStorage/ | grep -i proton`):
+To bring over what's missing, add `--copy-script`:
 
 ```bash
-./drive-compare.py ~/Dropbox my-files.tsv --sha1 \
-    --copy-script ~/Library/CloudStorage/ProtonDrive-you@example.com-folder
+./drive-compare.py ~/Dropbox my-files.tsv --sha1 --copy-script
 ```
 
 It writes `copy-to-proton-<label>-<timestamp>.sh` next to the lists: it copies
-the `TO-REVIEW-local` files into the Proton folder at the same relative path
-they have locally, creating subfolders as needed, and the app uploads them in
-the background. Files already in the Proton folder are never overwritten. The
-script is only written, not run: review it, run it, wait for the app to finish
-syncing, then scan and compare again.
+the `TO-REVIEW-local` files into the folder synced by the Proton Drive app, at
+the same relative path they have locally, creating subfolders as needed, and
+the app uploads them in the background. Files already in the Proton folder are
+never overwritten, and the script can be run again safely. It is only written,
+not run: review it, run it, wait for the app to finish syncing, then scan and
+compare again.
 
-The folder must correspond to the remote path you scanned: the synced folder
-itself for `/my-files`, its `Dropbox` subfolder if you scanned `/my-files/Dropbox`.
+The Proton Drive folder is found automatically in `~/Library/CloudStorage`. If
+there are several (e.g. an old copy with a date in its name, left by a sync
+reset), the one linked to the app is used. If you scanned a subfolder, or the
+folder can't be found, pass it explicitly:
+
+```bash
+./drive-compare.py ~/Dropbox my-files-Work.tsv --sha1 --copy-script \
+    --proton-folder ~/Library/CloudStorage/ProtonDrive-you@example.com-folder/Work
+```
+
+As a safety check, the script isn't written if none of the scanned top-level
+folders exist in the chosen folder.
 
 ### Checking a photo folder against Proton Photos (e.g. Camera Uploads)
 

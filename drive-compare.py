@@ -30,15 +30,20 @@ WHAT IT REPORTS
   <list>-<label>-<timestamp>.txt.
 
 COPY SCRIPT
-  With --copy-script PROTON_FOLDER it also writes
-  copy-to-proton-<label>-<timestamp>.sh: a bash script that copies the
-  TO-REVIEW local files (missing on Proton) into the folder synced by the
-  Proton Drive app, at the same relative path they have locally, creating
-  subfolders as needed. The app then uploads them in the background.
+  With --copy-script it also writes copy-to-proton-<label>-<timestamp>.sh:
+  a bash script that copies the TO-REVIEW local files (missing on Proton)
+  into the folder synced by the Proton Drive app, at the same relative path
+  they have locally, creating subfolders as needed. The app then uploads
+  them in the background.
 
-  PROTON_FOLDER is the local folder that corresponds to the remote path you
-  scanned: for /my-files it's the synced folder itself, usually
-  ~/Library/CloudStorage/ProtonDrive-<account>-folder.
+  The Proton Drive folder is found in ~/Library/CloudStorage: if there's
+  only one ProtonDrive folder it's that one; if there are several (e.g. an
+  old copy left by a reset, with a date in its name), it's the one linked
+  to the app (the only one with the com.apple.file-provider-domain-id
+  attribute). Otherwise, or if you scanned a subfolder (e.g. /my-files/Work),
+  pass the matching local folder with --proton-folder. As a safety check,
+  the script isn't written if none of the scanned top-level folders exist
+  in the chosen folder.
 
   Review the script, then run it. Files that are empty when it runs are
   skipped (online-only placeholders would be copied empty), files already
@@ -51,8 +56,9 @@ USAGE
   ./drive-compare.py ~/Dropbox proton.tsv --sha1          # compare content
   ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --label check-$(date +%Y%m) \\
       --exclude-dirs "Camera Uploads,Photos"
-  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 \\
-      --copy-script ~/Library/CloudStorage/ProtonDrive-you@example.com-folder
+  ./drive-compare.py ~/Dropbox my-files.tsv --sha1 --copy-script
+  ./drive-compare.py ~/Dropbox my-files-Work.tsv --sha1 --copy-script \\
+      --proton-folder ~/Library/CloudStorage/ProtonDrive-you@example.com-folder/Work
 
   A bare TSV name is looked up in --out-dir, where proton-scan.py writes it.
   --exclude-dirs takes TOP-LEVEL folder names, comma-separated, exact match.
@@ -67,6 +73,7 @@ import argparse
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 
@@ -101,9 +108,12 @@ def parse_args():
                    help="label used in output file names "
                         "(default: name of the local folder)")
     p.add_argument("--max-print", type=int, default=30)
-    p.add_argument("--copy-script", default=None, metavar="PROTON_FOLDER",
-                   help="also write a script that copies the missing files into this "
+    p.add_argument("--copy-script", action="store_true",
+                   help="also write a script that copies the missing files into the "
                         "folder synced by the Proton Drive app")
+    p.add_argument("--proton-folder", default=None,
+                   help="local folder matching the scanned path, used by --copy-script "
+                        "(default: the Proton Drive folder in ~/Library/CloudStorage)")
     a = p.parse_args()
     a.out_dir = os.path.expanduser(a.out_dir)
     if not a.label:
@@ -253,14 +263,65 @@ echo {verify}
 """
 
 
-def write_copy_script(a, local_root, missing, local, stamp):
+CLOUD_STORAGE = os.path.expanduser("~/Library/CloudStorage")
+DOMAIN_ATTR = "com.apple.file-provider-domain-id"
+
+
+def linked_to_app(path):
+    """True if the folder is the root of an active File Provider domain."""
+    try:
+        r = subprocess.run(["xattr", "-p", DOMAIN_ATTR, path],
+                           capture_output=True, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return False
+    return r.returncode == 0
+
+
+def find_proton_folder():
+    """The folder synced by the Proton Drive app: (path, None) or (None, error)."""
+    try:
+        names = sorted(n for n in os.listdir(CLOUD_STORAGE)
+                       if n.startswith("ProtonDrive")
+                       and os.path.isdir(os.path.join(CLOUD_STORAGE, n)))
+    except OSError:
+        names = []
+    paths = [os.path.join(CLOUD_STORAGE, n) for n in names]
+    if len(paths) == 1:
+        return paths[0], None
+    if not paths:
+        return None, (f"no Proton Drive folder in {CLOUD_STORAGE}. Is the Proton Drive "
+                      "app installed and signed in? Otherwise pass --proton-folder.")
+    linked = [p for p in paths if linked_to_app(p)]
+    if len(linked) == 1:
+        return linked[0], None
+    return None, ("several Proton Drive folders, and it's not clear which one the app "
+                  "uses:\n" + "\n".join("    " + p for p in paths)
+                  + "\n  Pass the right one with --proton-folder.")
+
+
+def write_copy_script(a, local_root, missing, local, remote, stamp):
     """Write the copy script; return its path, or None if the folder is unusable."""
-    dest = os.path.expanduser(a.copy_script).rstrip(os.sep)
+    if a.proton_folder:
+        dest = os.path.expanduser(a.proton_folder).rstrip(os.sep)
+    else:
+        dest, err = find_proton_folder()
+        if not dest:
+            print(f"  ERROR: {err}")
+            return None
+        print(f"  Proton Drive folder (found automatically): {dest}")
     if a.prefix:
         dest = os.path.join(dest, a.prefix.strip("/"))
     if not os.path.isdir(dest):
         print(f"  ERROR: Proton folder not found: {dest}")
         print("  Find it with: ls ~/Library/CloudStorage/ | grep -i proton")
+        return None
+    # the folder must match the scanned path: some of the scanned top-level
+    # names must be there (a subfolder scan pointed at the root fails here)
+    tops = {rel.split("/", 1)[0] for rel in remote}
+    if tops and not any(os.path.exists(os.path.join(dest, t)) for t in tops):
+        print(f"  ERROR: none of the scanned top-level items is in {dest}.")
+        print("  If you scanned a subfolder (e.g. /my-files/Work), pass the matching")
+        print("  local folder with --proton-folder.")
         return None
     real_dest, real_src = os.path.realpath(dest), os.path.realpath(local_root)
     if (real_dest + os.sep).startswith(real_src + os.sep) or \
@@ -462,7 +523,7 @@ def main():
         if not missing:
             print("  Copy script: nothing to copy (no TO-REVIEW local files).")
         else:
-            path = write_copy_script(a, local_root, missing, local, stamp)
+            path = write_copy_script(a, local_root, missing, local, remote, stamp)
             if path:
                 empty = sum(1 for r in missing if local[r][0] == 0)
                 print(f"  Copy script: {path}")
