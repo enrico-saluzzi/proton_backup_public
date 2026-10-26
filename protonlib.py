@@ -12,7 +12,10 @@ next to the script that imports it.
 """
 
 import hashlib
+import os
+import shlex
 import subprocess
+import time
 import unicodedata
 
 DEFAULT_CLI = "proton-drive"
@@ -74,3 +77,82 @@ def run_cli(cli, cmd, timeout, capture=True):
     """
     return subprocess.run([cli] + cmd, capture_output=capture, text=True,
                           stdin=subprocess.DEVNULL, timeout=timeout)
+
+
+# Upload scripts are generated, never run directly by these tools: the user
+# reviews them first. They must work with the bash 3.2 shipped with macOS
+# (no `set -u` with arrays, no associative arrays).
+_UPLOAD_SCRIPT = """#!/bin/bash
+{header}
+#
+# Review this file before running it: nothing has been uploaded yet.
+# Files that are empty at run time are skipped: an online-only placeholder
+# (0 bytes) would otherwise be uploaded as an empty file. Make the source
+# folders available offline first.
+
+CLI={cli}
+uploaded=0; skipped=0; failed=0
+{functions}
+# put DESTINATION FILE...: upload the non-empty files in one CLI call
+put() {{
+    dest="$1"; shift
+    files=()
+    for f in "$@"; do
+        if [ -s "$f" ]; then
+            files+=("$f")
+        else
+            echo "  skipped, empty or missing (online-only?): $f"
+            skipped=$((skipped + 1))
+        fi
+    done
+    [ ${{#files[@]}} -eq 0 ] && return 0
+    echo "  uploading ${{#files[@]}} file(s) -> $dest"
+    if {upload_cmd} < /dev/null; then
+        uploaded=$((uploaded + ${{#files[@]}}))
+    else
+        echo "  FAILED: upload -> $dest"
+        failed=$((failed + ${{#files[@]}}))
+    fi
+}}
+
+{calls}
+
+echo ""
+echo "Uploaded: $uploaded   Skipped: $skipped   Failed: $failed"
+echo ""
+echo "A zero exit code from the CLI doesn't prove the files arrived."
+echo "Verify by running the comparison again:"
+{verify}
+[ "$failed" -eq 0 ]
+"""
+
+
+def write_upload_script(path, cli, header, upload_cmd, calls, verify, functions=""):
+    """Write an executable bash script that uploads files with the CLI.
+
+    header: comment lines describing what the script does.
+    upload_cmd: the bash command run by put(); it can use "$CLI",
+        "${files[@]}" (the non-empty files) and "$dest".
+    calls: list of argument lists; each becomes `put DEST FILE...` (or a
+        raw line if it's a string, e.g. a call to a function in `functions`).
+    verify: shell commands to show for verifying the result afterwards.
+    """
+    lines = []
+    for c in calls:
+        lines.append(c if isinstance(c, str) else
+                     "put " + " ".join(shlex.quote(x) for x in c))
+    text = _UPLOAD_SCRIPT.format(
+        header="\n".join("# " + h if h else "#" for h in header),
+        cli=shlex.quote(cli),
+        functions=functions,
+        upload_cmd=upload_cmd,
+        calls="\n".join(lines),
+        verify="\n".join("echo " + shlex.quote("    " + v) for v in verify),
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(path, 0o755)
+
+
+def generated_on():
+    return time.strftime("%Y-%m-%d %H:%M")

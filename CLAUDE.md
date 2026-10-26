@@ -64,7 +64,16 @@ album-backup.py -> .proton-albums.json (list of {uid, name, photos, ...})
                    -> photo-prune.py, photo-redate.py, photo-reupload.py, photo-unlinked.py
 
 photo-redate.py -> redate-plan.json -> photo-reupload.py
+
+photo-compare.py -> reads the timeline itself (`photo timeline -d -j`, saved
+                   to ~/drive-sync-logs) or takes one with --inventory; it
+                   doesn't depend on a photo backup
 ```
+
+`photo-compare.py` matches local photos to Proton Photos by sha1, then by
+capture time (Dropbox Camera Uploads file name or EXIF), one Proton photo per
+local file. Matching "in any time zone" was tested on real data and rejected:
+it produced coincidental matches at offsets like +2h15.
 
 These file names and JSON keys are a contract between scripts and with
 existing backups on users' disks: changing one means updating every reader,
@@ -99,3 +108,9 @@ These are consequences of real failures, not style:
   it. A new phase needs its own checkpoint.
 - **Read-only unless stated**: the header's SAFETY section says what a script
   can touch; keep it accurate.
+- **Uploads go through a generated script, never run by the tools**
+  (`protonlib.write_upload_script`): the user reviews it first. The script
+  must skip files that are empty at run time (online-only placeholders read
+  as 0 bytes and would be uploaded empty) and must run on macOS bash 3.2.
+- **When in doubt, report missing**: a false "present" loses data when the
+  old copy is deleted; a false "missing" costs a duplicate.
