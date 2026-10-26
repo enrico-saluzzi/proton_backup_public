@@ -108,9 +108,13 @@ These are consequences of real failures, not style:
   it. A new phase needs its own checkpoint.
 - **Read-only unless stated**: the header's SAFETY section says what a script
   can touch; keep it accurate.
-- **Uploads go through a generated script, never run by the tools**
-  (`protonlib.write_upload_script`): the user reviews it first. The script
-  must skip files that are empty at run time (online-only placeholders read
-  as 0 bytes and would be uploaded empty) and must run on macOS bash 3.2.
+- **Uploads go through a generated script, never run by the tools**: the
+  user reviews it first. Drive files are copied into the folder synced by
+  the Proton Drive app (`drive-compare.py --copy-script`), never
+  overwriting; photos go through `photo upload`
+  (`protonlib.write_upload_script`), since Photos isn't a folder. Both
+  scripts must skip files that are empty at run time (online-only
+  placeholders read as 0 bytes and would be uploaded empty) and must run on
+  macOS bash 3.2.
 - **When in doubt, report missing**: a false "present" loses data when the
   old copy is deleted; a false "missing" costs a duplicate.
