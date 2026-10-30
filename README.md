@@ -66,7 +66,11 @@ Drive with a few thousand folders. `--root` picks the
 remote folder (default `/my-files`, the whole Drive). The scan is saved in
 `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
 command stops, and running it again resumes the scan; `--reuse-scan` skips it
-and uses the last complete one.
+and uses the last complete one. A new scan replaces the last complete one
+only when it completes, so stopping it never loses the previous scan. When the
+last complete scan is less than an hour old, the script says so and waits 10
+seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed
+on Proton since.
 
 Both read their choices from **profiles** in one configuration file, shared
 with `photo-backup.py`: `~/.config/proton-backup/config.ini` (another one with
@@ -326,7 +330,7 @@ plan you reviewed, and is resumable.
 
 | File | Written by | Used by |
 |---|---|---|
-| `~/drive-sync-logs/<root>.tsv` (the Drive scan; `.state`, `.queue` while incomplete) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
+| `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
 | `.proton-albums.json` | `photo-backup.py --albums` | `photo-prune.py`, `photo-redate.py` |

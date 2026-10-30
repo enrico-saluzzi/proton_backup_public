@@ -183,6 +183,9 @@ def generated_on():
 # downloading anything. flag is "-", UNDECRYPTABLE_NAME (the node uid is used
 # as the name) or ENCRYPTED_SIZE (only the encrypted size is known).
 #
+# A scan writes to <tsv>.partial and replaces <tsv> only when it's complete:
+# until then the last complete scan stays usable with --reuse-scan.
+#
 # Resuming: every folder fully listed is appended to <tsv>.state, every
 # folder discovered to <tsv>.queue. Both are removed when the scan completes.
 # If they're there and recent, the scan was interrupted (or some folders
@@ -190,12 +193,48 @@ def generated_on():
 # ---------------------------------------------------------------------------
 
 RESUME_HOURS = 24
+REUSE_HINT_MINUTES = 60      # a complete scan younger than this is worth reusing
+REUSE_HINT_WAIT = 10         # seconds to read the hint (and Ctrl-C) in a terminal
 
 
 def scan_path(root, log_dir=LOG_DIR):
     """Where the scan of a remote root is saved, e.g. /my-files -> my-files.tsv."""
     name = root.strip("/").replace("/", "-") or "root"
     return os.path.join(log_dir, name + ".tsv")
+
+
+def scan_complete(tsv):
+    """True if tsv holds a complete scan. A .state file without a .partial
+    one is a scan interrupted before .partial existed, written straight into
+    the TSV: that TSV is incomplete."""
+    if not os.path.exists(tsv):
+        return False
+    return not (os.path.exists(tsv + ".state") and not os.path.exists(tsv + ".partial"))
+
+
+def _suggest_reuse(out, root):
+    """Say so when the last complete scan is recent: Proton may not have
+    changed since, and a scan costs half an hour or more."""
+    if not scan_complete(out):
+        return
+    age = time.time() - os.path.getmtime(out)
+    if age > REUSE_HINT_MINUTES * 60:
+        return
+    minutes = max(1, int(age // 60))
+    print(f"  The last complete scan of {root} is {minutes} minute{'s' if minutes > 1 else ''} old.")
+    print("  If nothing changed on Proton since, stop now (Ctrl-C) and run again with")
+    print("  --reuse-scan. Otherwise wait: it scans again.")
+    if not (sys.stdin.isatty() and REUSE_HINT_WAIT):
+        return
+    try:
+        for left in range(REUSE_HINT_WAIT, 0, -1):
+            sys.stderr.write(f"\r  Scanning again in {left}s... ")
+            sys.stderr.flush()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        sys.stderr.write("\n")
+        sys.exit("Stopped before scanning: run again with --reuse-scan to use the last scan.")
+    sys.stderr.write("\r" + " " * 40 + "\r")
 
 
 def _escape_name(name):
@@ -213,7 +252,7 @@ def _to_epoch(iso):
 
 
 class _Scanner:
-    def __init__(self, cli, out, workers, delay, timeout, retries):
+    def __init__(self, cli, out, state_base, workers, delay, timeout, retries):
         self.cli, self.out = cli, out
         self.workers, self.delay, self.timeout, self.retries = workers, delay, timeout, retries
         self.q = queue.Queue()
@@ -223,8 +262,8 @@ class _Scanner:
         self.errors = []
         self.undecryptable = []
         self.visited = set()
-        self.state_path = out + ".state"
-        self.queue_path = out + ".queue"
+        self.state_path = state_base + ".state"
+        self.queue_path = state_base + ".queue"
         self.pending = 0
         self.pending_cv = threading.Condition()
 
@@ -383,12 +422,18 @@ def scan_drive(cli, root, workers=3, delay=0.2, timeout=300, retries=3, log_dir=
     """
     os.makedirs(log_dir, exist_ok=True)
     out = scan_path(root, log_dir)
+    partial = out + ".partial"
     state = out + ".state"
-    resume = (os.path.exists(state) and os.path.exists(out)
+    # a scan interrupted before .partial existed wrote straight into the TSV:
+    # carry it over, so it resumes instead of starting again
+    if os.path.exists(state) and os.path.exists(out) and not os.path.exists(partial):
+        os.replace(out, partial)
+    resume = (os.path.exists(state) and os.path.exists(partial)
               and time.time() - os.path.getmtime(state) < RESUME_HOURS * 3600)
     if resume:
         print(f"  Resuming the interrupted scan of {root}...")
     else:
+        _suggest_reuse(out, root)
         print(f"  Scanning {root} on Proton Drive...")
     try:
         subprocess.run([cli, "--help"], capture_output=True, timeout=30)
@@ -397,13 +442,14 @@ def scan_drive(cli, root, workers=3, delay=0.2, timeout=300, retries=3, log_dir=
     except Exception:
         pass
     t0 = time.time()
-    sc = _Scanner(cli, out, workers, delay, timeout, retries)
+    sc = _Scanner(cli, partial, out, workers, delay, timeout, retries)
     sc.run(root, resume)
     if sc.undecryptable:
         print(f"  WARNING: {len(sc.undecryptable)} names on Proton couldn't be decrypted "
               "(listed with their uid).")
     if sc.errors:
         return out, sc.errors
+    os.replace(partial, out)
     for p in (out + ".state", out + ".queue"):
         if os.path.exists(p):
             os.remove(p)

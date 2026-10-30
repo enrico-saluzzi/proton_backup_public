@@ -65,8 +65,11 @@ Scripts share state through files, so order matters:
 ```
 protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    flag); called by file-backup.py and drive-compare.py at
-                   start. Incomplete scans keep .state/.queue and resume
-                   (within 24 h); complete ones remove them.
+                   start. A scan writes <tsv>.partial and replaces <tsv>
+                   only when complete (scan_complete() tells which); an
+                   interrupted one keeps .partial/.state/.queue and resumes
+                   (within 24 h). A complete scan younger than an hour gets a
+                   --reuse-scan hint and a 10 s pause in a terminal.
 
 config.ini      -> ~/.config/proton-backup/config.ini (or --config): profiles
                    [<script> <name>] for every script; photo-prune.py and

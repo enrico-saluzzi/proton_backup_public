@@ -266,7 +266,7 @@ def get_scan(s, a):
     """Path of an up-to-date, complete scan of the Proton root."""
     tsv = protonlib.scan_path(s["proton_root"])
     if a.reuse_scan:
-        if not os.path.exists(tsv) or os.path.exists(tsv + ".state"):
+        if not protonlib.scan_complete(tsv):
             sys.exit(f"ERROR: no complete scan of {s['proton_root']} to reuse. "
                      "Run without --reuse-scan.")
         print(f"  Scan reused: {tsv}")

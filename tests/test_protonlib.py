@@ -13,13 +13,15 @@ Run from the repository root:
 
 import contextlib
 import io
+import json
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from helpers import REPO, ScriptTestCase, read  # noqa: E402
+from helpers import REPO, FakeStdin, ScriptTestCase, read, sha1  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +627,149 @@ class ScanFilesTest(ScriptTestCase):
 
     def test_as_local_replaces_characters_macos_cannot_store(self):
         self.assertEqual(self.plib.as_local('a:b|c*d?e<f>g"h.txt'), "a_b_c_d_e_f_g_h.txt")
+
+
+
+# ---------------------------------------------------------------------------
+# 8. The Drive scan: last complete scan kept, resume, reuse hint
+# ---------------------------------------------------------------------------
+
+class ScanDriveTest(ScriptTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.cli = self.fake_cli()
+        self.tsv = self.plib.scan_path("/my-files")
+        os.makedirs(os.path.dirname(self.tsv), exist_ok=True)
+        # no real waiting between retries or calls
+        sleep = mock.patch.object(self.plib.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def drive(self, files, fail_list=()):
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump({"drive": files, "fail_list": list(fail_list)}, f)
+
+    def scan(self, tty=False):
+        out = io.StringIO()
+        with mock.patch.object(self.plib.sys, "stdin", FakeStdin(tty)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            tsv, errors = self.plib.scan_drive(self.cli, "/my-files", workers=2,
+                                               delay=0, retries=1)
+        return tsv, errors, out.getvalue()
+
+    def paths(self, path):
+        return sorted(r[0] for r in self.plib.read_scan(path))
+
+    def age(self, minutes):
+        t = time.time() - minutes * 60
+        os.utime(self.tsv, (t, t))
+
+    def test_complete_scan_replaces_the_tsv_and_cleans_up(self):
+        self.drive({"/my-files/a.txt": "a", "/my-files/Sub/b.txt": "b"})
+        tsv, errors, _ = self.scan()
+        self.assertEqual((tsv, errors), (self.tsv, []))
+        self.assertEqual(self.paths(self.tsv), ["Sub/b.txt", "a.txt"])
+        for ext in (".partial", ".state", ".queue"):
+            self.assertFalse(os.path.exists(self.tsv + ext), ext)
+        self.assertTrue(self.plib.scan_complete(self.tsv))
+
+    def test_incomplete_scan_keeps_the_last_complete_one(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.drive({"/my-files/a.txt": "a", "/my-files/New/n.txt": "n"},
+                   fail_list=["/my-files/New"])
+        _, errors, _ = self.scan()
+        self.assertTrue(errors)
+        self.assertEqual(self.paths(self.tsv), ["a.txt"])
+        self.assertTrue(os.path.exists(self.tsv + ".partial"))
+        self.assertTrue(self.plib.scan_complete(self.tsv))
+
+    def test_interrupted_scan_resumes_and_then_replaces_the_tsv(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.drive({"/my-files/a.txt": "a", "/my-files/New/n.txt": "n"},
+                   fail_list=["/my-files/New"])
+        self.scan()
+        self.drive({"/my-files/a.txt": "a", "/my-files/New/n.txt": "n"})
+        _, errors, out = self.scan()
+        self.assertEqual(errors, [])
+        self.assertIn("Resuming", out)
+        self.assertEqual(self.paths(self.tsv), ["New/n.txt", "a.txt"])
+        # only the folder that failed was listed again
+        lists = [c[2] for c in self.cli_calls("filesystem", "list")]
+        self.assertEqual(lists.count("/my-files"), 2)
+        self.assertFalse(os.path.exists(self.tsv + ".partial"))
+
+    def test_scan_interrupted_before_partial_files_existed_resumes(self):
+        # the old scanner wrote straight into the TSV, with .state next to it
+        self.drive({"/my-files/a.txt": "a", "/my-files/Sub/b.txt": "b"})
+        with open(self.tsv + ".state", "w") as f:
+            f.write("/my-files\n")
+        with open(self.tsv + ".queue", "w") as f:
+            f.write("/my-files/Sub\tSub\n")
+        with open(self.tsv, "w") as f:
+            f.write("a.txt\t1\t0\t" + sha1("a") + "\t-\n")
+        self.assertFalse(self.plib.scan_complete(self.tsv))
+        _, errors, out = self.scan()
+        self.assertEqual(errors, [])
+        self.assertIn("Resuming", out)
+        self.assertEqual(self.paths(self.tsv), ["Sub/b.txt", "a.txt"])
+        self.assertEqual([c[2] for c in self.cli_calls("filesystem", "list")], ["/my-files/Sub"])
+
+    def test_scan_complete_without_a_tsv_is_false(self):
+        self.assertFalse(self.plib.scan_complete(self.tsv))
+
+    def test_recent_scan_suggests_reuse(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.age(10)
+        _, _, out = self.scan()
+        self.assertIn("10 minutes old", out)
+        self.assertIn("--reuse-scan", out)
+
+    def test_old_scan_says_nothing(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.age(self.plib.REUSE_HINT_MINUTES + 5)
+        _, _, out = self.scan()
+        self.assertNotIn("--reuse-scan", out)
+
+    def test_incomplete_tsv_is_never_suggested(self):
+        self.drive({"/my-files/a.txt": "a"})
+        with open(self.tsv + ".state", "w") as f:
+            f.write("")
+        with open(self.tsv, "w") as f:
+            f.write("")
+        self.age(1)
+        os.utime(self.tsv + ".state", (0, 0))     # too old to resume
+        _, _, out = self.scan()
+        self.assertNotIn("--reuse-scan", out)
+
+    def test_ctrl_c_during_the_countdown_stops_before_scanning(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.age(5)
+        before = read(self.tsv)
+        calls = len(self.cli_calls("filesystem", "list"))
+        self.plib.REUSE_HINT_WAIT = 3
+        with mock.patch.object(self.plib.time, "sleep", side_effect=KeyboardInterrupt):
+            with self.assertRaises(SystemExit) as cm:
+                self.scan(tty=True)
+        self.assertIn("--reuse-scan", str(cm.exception.code))
+        self.assertEqual(read(self.tsv), before)
+        self.assertEqual(len(self.cli_calls("filesystem", "list")), calls)
+
+    def test_countdown_only_in_a_terminal(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.age(5)
+        self.plib.REUSE_HINT_WAIT = 3
+        with mock.patch.object(self.plib.time, "sleep") as sleep:
+            self.scan(tty=False)
+            self.assertEqual(sleep.call_count, 0)
+            self.scan(tty=True)
+            self.assertGreaterEqual(sleep.call_count, 3)
 
 
 if __name__ == "__main__":
