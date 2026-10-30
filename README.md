@@ -57,7 +57,7 @@ single command and does everything it needs by itself.
 | I want to... | Script |
 |---|---|
 | back up my Drive files to a local disk | `file-backup.py` |
-| check that a local folder (e.g. Dropbox) is all on Drive, and copy over what's missing | `drive-compare.py --copy-script` |
+| check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and
 **sha1** of every file, in parallel, in seconds even on tens of thousands of
@@ -110,42 +110,80 @@ backup matches what Proton *declares* to hold.
 
 #### Migrating from another cloud (e.g. Dropbox)
 
-Before deleting the old copy, check that every file arrived on Drive (for the
-camera folder, see *Photos* below).
+Before deleting the old copy, check that nothing in it is missing on Drive
+(for the camera folder, see *Photos* below). The same check works later on any
+copy of your files, e.g. on a disk.
+
+Describe the folder once, as a **profile**: the script asks one question at a
+time and saves the answers in `~/.config/proton-backup/config.ini`
+([`config.example.ini`](config.example.ini) documents every setting):
 
 ```bash
-./drive-compare.py ~/Dropbox --sha1 --exclude-dirs "Camera Uploads"
+./drive-compare.py --setup dropbox
 ```
 
-- If the content landed in a subfolder on Proton (check with
-  `proton-drive filesystem list /my-files`), compare with that one:
-  `--root /my-files/Dropbox`.
-- `--exclude-dirs` takes top-level folder names, exact match.
-- Make the Dropbox folders **available offline** first: online-only files have
-  no local content and can only be listed as "not verified".
-- Only the `TO-REVIEW-local-*` and `TO-REVIEW-proton-*` lists in
-  `~/drive-sync-logs` need a decision; the rest is structural noise (macOS
-  packages, Icon files, Office lock files).
-
-To bring over what's missing, add `--copy-script`:
+Then compare whenever you want:
 
 ```bash
-./drive-compare.py ~/Dropbox --sha1 --copy-script
+./drive-compare.py dropbox
 ```
 
-It writes `copy-to-proton-<label>-<timestamp>.sh` next to the lists: it copies
-the `TO-REVIEW-local` files into the folder synced by the Proton Drive app, at
-the same relative path they have locally, creating subfolders as needed, and
-the app uploads them in the background. Files already in the Proton folder are
-never overwritten, and the script can be run again safely. It is only written,
-not run: review it, run it, wait for the app to finish syncing, then compare
-again.
+The profile name is how the folder is called in the report ("Only in
+dropbox"). A path works too (`./drive-compare.py ~/Dropbox`): the defaults
+apply and the folder is called "folder". Options on the command line
+(`--winner ask`, `--exclude "Camera Uploads"`, ...) override the profile.
+
+What it does with each file in the folder:
+
+| Situation | What happens |
+|---|---|
+| same path on Drive, same content (sha1) | identical, counted |
+| same path, different content | decided by `winner`: `proton` keeps Drive's (default), `folder` copies the folder's over it, `newer` picks the most recently modified, `ask` lists it |
+| not at that path, but found elsewhere on Drive | moved or renamed, counted (`moved = list` to see them) |
+| listed in the ignore file | deleted from Drive on purpose, counted |
+| system files, content of macOS packages | counted (Drive stores a package as one `.pkgf` file) |
+| nowhere on Drive | **needs a decision**, with a note if something with that name is in the Proton trash |
+
+Files only on Drive are counted, or listed with `proton_only = list`.
+
+The result is **one report**, `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt`:
+what needs a decision on top, counts of everything else below. `--details`
+appends the full lists to it.
+
+- Moved files are found by sha1 when the file is on disk. An online-only
+  placeholder has no content to hash, so it's matched **by name** (and size,
+  when the placeholder reports it): the report says how many were matched by
+  name only. Make the folder **available offline** for a check by content.
+- The **ignore file** (`~/.config/proton-backup/ignore-<profile>.txt`) lists
+  paths you deleted from Drive on purpose: one per line, a folder covers
+  everything under it, `*` and `?` work as in the shell.
+- The **Proton trash** is read only as a hint: the CLI can't list what's
+  inside a trashed folder, and the trash is emptied after a while.
+- If at most `review_max` files (default 20) need a decision and you're in a
+  terminal, the script asks for each one: **c** copy to Drive, **i** ignore
+  forever (added to the ignore file), **s** skip, **q** stop asking. With more
+  files there's only the report: a review of hundreds of files never ends.
+- If the content landed in a subfolder on Drive (check with
+  `proton-drive filesystem list /my-files`), set `proton_root` (or `--root`)
+  to it, e.g. `/my-files/Dropbox`.
+- `exclude` takes top-level folder names, exact match, and applies to both
+  sides.
+
+When there's something to copy (files where the folder wins, files you chose
+**c** for, and with `copy_script = yes` every file missing on Drive), the
+script also writes `copy-to-proton-<profile>-<timestamp>.sh`: it copies those
+files into the folder synced by the Proton Drive app, at the same relative
+path, creating subfolders as needed, and the app uploads them in the
+background. Missing files never overwrite anything; a file where the folder's
+version wins replaces Drive's, which keeps the old one in its version
+history. The script is only written, not run: review it, run it, wait for the
+app to finish syncing, then compare again.
 
 The Proton Drive folder is found automatically in `~/Library/CloudStorage`
 (with `--root /my-files/Work`, its `Work` subfolder). If there are several
 (e.g. an old copy with a date in its name, left by a sync reset), the one
 linked to the app is used. If it can't be found, pass it with
-`--proton-folder`. As a safety check, the script isn't written if none of the
+`proton_folder` (or `--proton-folder`). As a safety check, the script isn't written if none of the
 scanned top-level folders exist in the chosen folder.
 
 ### Photos (Proton Photos)
@@ -246,11 +284,15 @@ to change it).
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
-| `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py --copy-script` | you, after reviewing it |
+| `~/.config/proton-backup/config.ini` (the profiles) | `drive-compare.py --setup`, or you | `drive-compare.py` |
+| `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
+| `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |
+| `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py`, when there's something to copy | you, after reviewing it |
 | `~/drive-sync-logs/photos-upload-*.sh` | `photo-compare.py --upload-script` | you, after reviewing it |
 
 Photo files live in the photo backup folder; Drive inventories, comparison
-lists and upload scripts in `~/drive-sync-logs`.
+reports and upload scripts in `~/drive-sync-logs`; your choices in
+`~/.config/proton-backup`.
 
 ---
 
@@ -306,6 +348,17 @@ ps -Ao pcpu,comm | grep -i fileproviderd     # above 100% = problem
   sessions are separate and the CLI otherwise hangs without saying so.
 - Don't empty the trash from the web while a resync is running.
 - `killall fileproviderd` is harmless: launchd restarts it.
+
+---
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Standard library only. The tests run against temporary folders and a fake
+`proton-drive`: they never touch your files or your Proton account.
 
 ---
 
