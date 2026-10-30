@@ -611,7 +611,7 @@ PROFILE_SETTINGS = {
         ("verify", "yes",
          "yes = recompute the sha1 of every local file: the only check that "
          "catches a corrupted file of the same size (slower)"),
-        ("cleanup", "no",
+        ("cleanup", "yes",
          "yes = the backup follows Proton: old copies of files moved on Proton "
          "are deleted, files deleted on Proton are moved to "
          ".deleted-on-proton/<date>/ in the backup (empty it by hand)"),

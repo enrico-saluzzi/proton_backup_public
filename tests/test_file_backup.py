@@ -278,14 +278,14 @@ class SetupTest(FileBackupTestCase):
     def test_enter_keeps_the_defaults(self):
         self.run_setup([self.dest] + [""] * 6, "ssd")
         self.assertEqual(self.saved(), {"dest": self.dest, "proton_root": "/my-files",
-                                        "verify": "yes", "cleanup": "no", "workers": "3",
+                                        "verify": "yes", "cleanup": "yes", "workers": "3",
                                         "batch": "20", "timeout": "1800"})
 
     def test_new_profile_offers_an_example_dest(self):
         _, _, prompts = self.run_setup([self.dest] + [""] * 6, "ssd")
         self.assertIn("(/Volumes/MyBackupDisk/proton-files)", prompts[0])
         self.assertIn("verify [yes/no] (yes)", prompts[2])
-        self.assertIn("cleanup [yes/no] (no)", prompts[3])
+        self.assertIn("cleanup [yes/no] (yes)", prompts[3])
 
     def test_invalid_answers_are_asked_again(self):
         _, out, _ = self.run_setup([self.dest, "", "maybe", "no", "", "0", "x", "2", "", ""], "ssd")
@@ -469,8 +469,8 @@ class EndToEndTest(EndToEndCase):
         self.assertEqual(self.backup("a.txt"), "alphX")
         self.assertNotIn("Verified by content", out)
 
-    def test_files_only_in_the_backup_are_reported_and_kept(self):
-        self.profile()
+    def test_files_only_in_the_backup_are_reported_and_kept_with_cleanup_no(self):
+        self.profile(cleanup="no")
         self.set_proton({"a.txt": "alpha"})
         self.write(os.path.join(self.dest, "Old", "gone.txt"), "deleted on Proton")
         self.write(os.path.join(self.dest, ".DS_Store"), "x")
@@ -668,6 +668,16 @@ class CleanupTest(EndToEndCase):
         self.assertEqual(read(self.held("a.txt")), "alpha")
         self.assertNotIn("old copy deleted", out)
 
+    def test_cleanup_is_on_by_default(self):
+        self.profile()
+        self.set_proton(dict(self.STAY, **{"gone.txt": "deleted on Proton"}))
+        self.run_main()
+        self.set_proton(dict(self.STAY))
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.path("gone.txt")))
+        self.assertEqual(read(self.held("gone.txt")), "deleted on Proton")
+
     def test_cleanup_no_keeps_and_reports(self):
         self.first_backup({"gone.txt": "deleted on Proton"})
         self.profile(cleanup="no")
@@ -681,7 +691,7 @@ class CleanupTest(EndToEndCase):
         self.set_proton(dict(self.STAY))
         self.run_main("--no-cleanup")
         self.assertEqual(self.backup("gone.txt"), "deleted on Proton")
-        self.profile()
+        self.profile(cleanup="no")
         self.run_main("--cleanup")
         self.assertFalse(os.path.exists(self.path("gone.txt")))
         self.assertTrue(os.path.exists(self.held("gone.txt")))

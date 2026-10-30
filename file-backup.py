@@ -23,7 +23,7 @@ WHAT IT DOES
   3. downloads what is missing and what has a different size
   4. verifies (verify = yes, the default): recomputes the local sha1 and
      re-downloads any mismatch
-  5. cleans up (cleanup = yes; off by default), only when every download
+  5. cleans up (cleanup = yes, the default), only when every download
      succeeded, the files in the backup that are no longer on Proton:
        - moved or renamed on Proton: the old copy is deleted, once the same
          content is in the backup at its new path (checked by sha1)
@@ -53,8 +53,8 @@ PROFILES
   then back up with ./file-backup.py ssd, or just ./file-backup.py when it's
   the only file-backup profile. A folder path works too, with the defaults.
   Command-line options override the profile. --verify is on by default
-  (verify = yes): turn it off with verify = no or --no-verify. --cleanup and
-  --no-cleanup override cleanup.
+  (verify = yes): turn it off with verify = no or --no-verify. So is the
+  cleanup (cleanup = yes): turn it off with cleanup = no or --no-cleanup.
 
 USAGE
   ./file-backup.py --setup ssd
@@ -108,9 +108,10 @@ def parse_args():
                    help="trust name and size: faster, misses silent corruption")
     c = g.add_mutually_exclusive_group()
     c.add_argument("--cleanup", dest="cleanup", action="store_const", const="yes",
-                   help="remove from the backup what is no longer on Proton (see step 5)")
+                   help="remove from the backup what is no longer on Proton, see step 5 "
+                        "(the default)")
     c.add_argument("--no-cleanup", dest="cleanup", action="store_const", const="no",
-                   help="only report what is no longer on Proton (the default)")
+                   help="only report what is no longer on Proton")
     g.add_argument("--workers", type=int, help="parallel calls while scanning (default 3)")
     g.add_argument("--batch", type=int, help="files per download call (default 20)")
     g.add_argument("--timeout", type=int, help="timeout per download call, in seconds (default 1800)")
