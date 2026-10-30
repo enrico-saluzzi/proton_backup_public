@@ -19,6 +19,7 @@ import os
 import queue
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -617,7 +618,7 @@ PROFILE_SETTINGS = {
          "(empty it by hand)"),
         ("deleted_dir", "",
          "where cleanup moves the files deleted on Proton, one folder per date "
-         "(empty = deleted-on-proton next to the backup folder)"),
+         "(empty = deleted/files next to the backup folder)"),
         ("workers", "3",
          "parallel calls to the CLI while scanning Proton"),
         ("batch", "20",
@@ -634,6 +635,13 @@ PROFILE_SETTINGS = {
         ("album_dir", "album",
          "where the album folders go: relative to dest, or an absolute path on "
          "the same disk (hard links can't cross disks)"),
+        ("cleanup", "yes",
+         "yes = the backup follows Proton: photos deleted on Proton are moved "
+         "to deleted_dir (empty it by hand), extra copies of a photo are "
+         "deleted, and album folders lose the photos no longer in the album"),
+        ("deleted_dir", "",
+         "where cleanup moves the photos deleted on Proton, one folder per date "
+         "(empty = deleted/photos next to the backup folder)"),
         ("batch", "5",
          "photos per CLI call (bigger batches time out more)"),
         ("timeout", "300",
@@ -905,3 +913,80 @@ def run_setup(config_path, script, name, questions):
     print(f"  Run it with:  ./{script}.py" + (f" {name}" if len(others) > 1 else
                                               f"   (or ./{script}.py {name})"))
     return 0
+
+
+# --- Cleanup: the backup follows Proton ---------------------------------------
+#
+# file-backup.py and photo-backup.py (cleanup = yes) take out of the backup
+# what is no longer on Proton. They delete a file only when its content stays
+# in the backup; anything else is moved to deleted_dir/<date>/, which they
+# never empty.
+
+# cleanup stops when it would take away more than this share of the backup
+CLEANUP_MAX = 0.10
+
+
+def deleted_dir(dest, setting, default_name, cleanup, where):
+    """Where cleanup moves what was deleted on Proton: the deleted_dir
+    setting, or default_name next to the backup folder. Next to the root of
+    a disk would be another disk (/Volumes), so there the setting is
+    required."""
+    if setting:
+        return os.path.expanduser(setting)
+    if cleanup and os.path.ismount(dest):
+        sys.exit(f"ERROR: {dest} is the root of a disk, so cleanup has no folder next "
+                 f"to it for what was deleted on Proton ({where}).\n"
+                 "  Set deleted_dir (--deleted-dir), e.g. a folder on the same disk.")
+    return os.path.join(os.path.dirname(os.path.abspath(dest).rstrip(os.sep)), default_name)
+
+
+def too_much_to_clean(removed, total):
+    """True when cleanup would take away more than CLEANUP_MAX of the backup
+    (and more than 10 files): usually a wrong folder, not real deletions."""
+    return removed > max(10, CLEANUP_MAX * total)
+
+
+def free_path(path):
+    """path, or path with " (2)", " (3)"... before the extension if it exists."""
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.lexists(path):
+        n += 1
+        path = f"{base} ({n}){ext}"
+    return path
+
+
+def move_aside(path, target):
+    """Moves path to target (renamed if taken), creating its folders. Works
+    across disks too."""
+    target = free_path(target)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    shutil.move(path, target)
+    return target
+
+
+def remove_empty_dirs(base, folder):
+    """Removes folder and its parents up to base while they are empty (a
+    Finder .DS_Store doesn't count)."""
+    while folder != base and folder.startswith(base + os.sep):
+        try:
+            if os.listdir(folder) == [".DS_Store"]:
+                os.remove(os.path.join(folder, ".DS_Store"))
+            os.rmdir(folder)
+        except OSError:
+            return
+        folder = os.path.dirname(folder)
+
+
+def report_deleted_dir(root):
+    """Reminds what cleanup has moved aside so far."""
+    count = size = 0
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            if not fn.startswith("."):
+                count += 1
+                size += os.path.getsize(os.path.join(dirpath, fn))
+    if count:
+        print("")
+        print(f"  Deleted on Proton, kept aside: {count} files ({human(size)}) in {root}")
+        print("  Delete what you no longer need: the script never empties it.")
