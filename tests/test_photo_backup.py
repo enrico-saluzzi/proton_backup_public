@@ -760,6 +760,42 @@ class CleanupTest(EndToEndCase):
         self.assertEqual(os.stat(link).st_ino, os.stat(self.photo("2023", "snow.jpg")).st_ino)
         self.assertEqual(os.stat(link).st_nlink, 2)
 
+    def test_second_name_of_a_photo_in_an_album_is_removed(self):
+        self.with_albums()
+        self.run_main()
+        folder = os.path.join(self.album_dir, "Holidays")
+        os.link(os.path.join(folder, "snow.jpg"), os.path.join(folder, "snow (1).jpg"))
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+        self.assertIn("Second names of the same photo in an album, removed: 1", out)
+
+    def test_album_photo_under_another_name_is_not_linked_again(self):
+        self.with_albums(cleanup="no")
+        self.run_main()
+        folder = os.path.join(self.album_dir, "Holidays")
+        os.rename(os.path.join(folder, "snow.jpg"), os.path.join(folder, "snow (1).jpg"))
+        _, out = self.run_main()
+        self.assertEqual(self.album(), ["beach.jpg", "snow (1).jpg"])
+        self.assertIn("Album links created / present .. 0 / 2", out)
+
+    def test_moving_the_kept_copy_leaves_one_name_per_photo_in_the_album(self):
+        # the album links "snow (1).jpg", an identical second copy: after the
+        # cleanup the album has the photo once, under the name of the file kept
+        self.with_albums()
+        self.run_main()
+        folder = os.path.join(self.album_dir, "Holidays")
+        copy = self.photo("2023", "snow (1).jpg")
+        self.write(copy, "snow pixels")
+        os.remove(os.path.join(folder, "snow.jpg"))
+        os.link(copy, os.path.join(folder, "snow (1).jpg"))
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(copy))
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+        self.assertEqual(os.stat(os.path.join(folder, "snow.jpg")).st_ino,
+                         os.stat(self.photo("2023", "snow.jpg")).st_ino)
+
     def test_two_proton_photos_with_the_same_content_keep_their_files(self):
         twins = [{"uid": "t1", "name": "twin.jpg", "content": "same", "capture": "2022-01-01T00:00:00Z"},
                  {"uid": "t2", "name": "twin.jpg", "content": "same", "capture": "2022-01-01T00:00:00Z"}]

@@ -642,10 +642,16 @@ def link_albums(a, albums, photo_map):
     for x in albums:
         folder = os.path.join(a.album_base, safe_name(x["name"]))
         os.makedirs(folder, exist_ok=True)
+        present = {inode(os.path.join(folder, f)) for f in os.listdir(folder)
+                   if os.path.isfile(os.path.join(folder, f))}
         for u in x["photos"]:
             src = photo_map.get(u)
             if not src or not os.path.exists(src):
                 unlinked.append((x["name"], u))
+                continue
+            # already there, maybe under another name: not a second name for it
+            if inode(src) in present:
+                existing += 1
                 continue
             # two different photos of the same album can share a file name: a
             # file already there counts as "this photo" only with the same content
@@ -660,6 +666,7 @@ def link_albums(a, albums, photo_map):
                 continue
             try:
                 os.link(src, dst)
+                present.add(inode(src))
                 created += 1
             except OSError:
                 try:
@@ -687,16 +694,22 @@ def album_leftovers(a, albums, photo_map, expected_sha):
     """Files in the album folders that are no longer in their album on Proton,
     or in the folder of an album deleted on Proton. A file stays if it's one
     of the album's photos (same file, or same content). Albums that were read
-    incompletely are left alone. Returns (leftovers, files looked at)."""
+    incompletely are left alone. Several names for the same file in one
+    folder are second names: one stays, preferably the name of the photo
+    file. Returns (leftovers, second names, files looked at)."""
     wanted, incomplete = {}, set()
     for x in albums:
         folder = safe_name(x["name"])
         wanted.setdefault(folder, set()).update(x["photos"])
         if x.get("error") or (x.get("photoCount") and len(x["photos"]) != x["photoCount"]):
             incomplete.add(folder)
-    leftovers, seen = [], 0
+    leftovers, second, seen = [], [], 0
     if not os.path.isdir(a.album_base):
-        return leftovers, seen
+        return leftovers, second, seen
+    photo_names = {}
+    for p in photo_map.values():
+        if os.path.exists(p):
+            photo_names.setdefault(inode(p), os.path.basename(p))
     for folder in sorted(os.listdir(a.album_base)):
         path = os.path.join(a.album_base, folder)
         if folder.startswith(".") or not os.path.isdir(path) or folder in incomplete:
@@ -705,6 +718,7 @@ def album_leftovers(a, albums, photo_map, expected_sha):
         inodes = {inode(photo_map[u]) for u in uids
                   if u in photo_map and os.path.exists(photo_map[u])}
         hashes = {expected_sha[u] for u in uids if u in expected_sha}
+        names = {}
         for f in sorted(os.listdir(path)):
             fp = os.path.join(path, f)
             if f.startswith(".") or not os.path.isfile(fp):
@@ -712,7 +726,14 @@ def album_leftovers(a, albums, photo_map, expected_sha):
             seen += 1
             if inode(fp) not in inodes and protonlib.sha1_of(fp) not in hashes:
                 leftovers.append(fp)
-    return leftovers, seen
+            else:
+                names.setdefault(inode(fp), []).append(f)
+        for key, fs in names.items():
+            if len(fs) > 1:
+                keep = photo_names.get(key)
+                keep = keep if keep in fs else min(fs, key=lambda f: (" (" in f, f))
+                second += [os.path.join(path, f) for f in fs if f != keep]
+    return leftovers, second, seen
 
 
 def plan_cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
@@ -722,6 +743,7 @@ def plan_cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
       kept   content not on Proton, but named like a Proton photo that has no
              file in the backup (a converted copy?): left alone
       links  album files no longer in their album (albums=None: not checked)
+      second second names of a file in the same album folder: deleted
     and the number of files looked at."""
     proton = set(expected_sha.values())
     mapped = set(photo_map.values())
@@ -736,9 +758,9 @@ def plan_cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
             kept.append(p)
         else:
             gone.append(p)
-    links, seen = ([], 0) if albums is None else album_leftovers(a, albums, photo_map,
-                                                                  expected_sha)
-    return gone, extra, kept, links, len(local_hashes) + seen
+    links, second, seen = (([], [], 0) if albums is None
+                           else album_leftovers(a, albums, photo_map, expected_sha))
+    return gone, extra, kept, links, second, len(local_hashes) + seen
 
 
 def album_files_by_inode(a):
@@ -754,12 +776,18 @@ def album_files_by_inode(a):
     return out
 
 
-def relink(link, target):
+def relink(link, target, album_links):
     """Points the album file `link` to `target` (a hard link), replacing it
-    in one step."""
+    in one step; if its folder already has `target` under another name, the
+    link just goes."""
+    names = album_links.setdefault(inode(target), [])
+    if any(os.path.dirname(n) == os.path.dirname(link) for n in names):
+        os.remove(link)
+        return
     tmp = link + ".relink"
     os.link(target, tmp)
     os.replace(tmp, link)
+    names.append(link)
 
 
 def print_list(a, title, paths, base):
@@ -774,18 +802,20 @@ def print_list(a, title, paths, base):
 
 def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
     """Step 7. Returns False if it stopped or something couldn't be cleaned."""
-    gone, extra, kept, links, total = plan_cleanup(a, inventory, local_hashes, photo_map,
-                                                   albums, expected_sha)
+    gone, extra, kept, links, second, total = plan_cleanup(
+        a, inventory, local_hashes, photo_map, albums, expected_sha)
     hold = os.path.join(a.deleted_dir, time.strftime("%Y-%m-%d"))
-    if not (gone or extra or kept or links):
+    if not (gone or extra or kept or links or second):
         return True
     print("")
     print_list(a, f"Deleted on Proton, moved to {hold}", gone, a.dest)
     print_list(a, "Extra copies of a photo already in the backup, deleted", extra, a.dest)
     print_list(a, "Album photos no longer in the album, removed", links, a.album_base)
+    print_list(a, "Second names of the same photo in an album, removed", second,
+               a.album_base)
     print_list(a, "Kept: content not on Proton, but named like a photo missing from "
                   "the backup (a converted copy?)", kept, a.dest)
-    removed = len(gone) + len(extra) + len(links)
+    removed = len(gone) + len(extra) + len(links) + len(second)
     if a.dry_run:
         print("")
         print("  (--dry-run: nothing cleaned up)")
@@ -806,6 +836,11 @@ def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
     for u, p in photo_map.items():
         if u in expected_sha and os.path.exists(p):
             stays.setdefault(expected_sha[u], p)
+    for p in second:        # the same file stays under another name
+        try:
+            os.remove(p)
+        except OSError as e:
+            errors.append((p, e))
     album_links = album_files_by_inode(a) if albums is not None and extra else {}
     for p in gone:
         try:
@@ -817,7 +852,7 @@ def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
     for p in extra:
         try:
             for link in album_links.get(inode(p), []):
-                relink(link, stays[local_hashes[p]])
+                relink(link, stays[local_hashes[p]], album_links)
             os.remove(p)
             protonlib.remove_empty_dirs(a.dest, os.path.dirname(p))
         except OSError as e:
