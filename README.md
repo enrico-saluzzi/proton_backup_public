@@ -347,7 +347,9 @@ them (the macOS Trash is your safety net). Then:
 ./photo-prune.py --from-missing --apply
 ```
 
-Then run the monthly photo backup again. Proton's trash has no expiry.
+It trashes on Proton the photos that the photo backup reports as "deleted from
+the backup, still on Proton" (`photos-deleted-locally.txt`). Then run the
+monthly photo backup again. Proton's trash has no expiry.
 
 #### Fixing dates of scanned photos
 

@@ -13,9 +13,12 @@ WHY
   photos to Proton's trash.
 
 TWO MODES
-  --from-missing   compares the uid -> file map with the disk: whatever you
-                   already deleted by hand from the backup is trashed on
-                   Proton too. This is the usual workflow.
+  --from-missing   the photos you already deleted by hand from the backup
+                   are trashed on Proton too: the files of the uid -> file
+                   map that are gone from disk, plus the photos listed in
+                   photos-deleted-locally.txt (written by photo-backup.py:
+                   it also knows photos deleted before the map remembered
+                   them). This is the usual workflow.
 
   --from-list FILE uses a file with lines "delete <path>" (paths relative to
                    the backup folder), e.g. produced by a duplicate review.
@@ -26,6 +29,8 @@ TWO MODES
   photo-backup.py on content (sha1). photo-backup.py keeps the last known
   path of photos deleted from the backup, so the order doesn't matter: it
   also lists them in photos-deleted-locally.txt and suggests this script.
+  A photo of that list whose file is in the backup again (e.g. after
+  --redownload-missing) is left alone.
 
 SAFETY
   - dry run by default: nothing happens without --apply
@@ -61,6 +66,7 @@ import protonlib
 PHOTO_MAP = ".proton-photo-map.json"
 ALBUM_MAP = ".proton-albums.json"
 STATE = "prune-state.json"
+DELETED_LOCALLY = "photos-deleted-locally.txt"   # written by photo-backup.py
 
 
 SCRIPT = "photo-prune"
@@ -169,6 +175,22 @@ def main():
         for u, p in photo_map.items():
             if not os.path.exists(p):
                 to_remove.append((u, p))
+        # photo-backup.py's own list ("uid, name, year"): photos deleted
+        # before the map remembered their path. One whose file is back in
+        # the backup (the list can be older than the disk) is not missing.
+        listed = os.path.join(a.dest, DELETED_LOCALLY)
+        if os.path.exists(listed):
+            seen = {u for u, _ in to_remove}
+            with open(listed, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 3 or not parts[0] or parts[0] in seen:
+                        continue
+                    u, name, year = parts[:3]
+                    if u in photo_map and os.path.exists(photo_map[u]):
+                        continue
+                    seen.add(u)
+                    to_remove.append((u, os.path.join(a.dest, year, name)))
 
     if a.limit:
         to_remove = to_remove[:a.limit]

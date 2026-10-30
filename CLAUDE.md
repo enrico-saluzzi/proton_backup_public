@@ -114,7 +114,9 @@ names, because the CLI renames duplicates and identical content can exist
 under several uids; among identical copies, a photo is paired with the copy
 bearing its own name. `photo-backup.py` rebuilds it on every run and keeps the
 last known path of photos deleted from the backup but still on Proton:
-`photo-prune.py --from-missing` relies on those paths not existing.
+`photo-prune.py --from-missing` relies on those paths not existing, and also
+reads `photos-deleted-locally.txt`, so both scripts see the same photos even
+when one was deleted before the map remembered it.
 
 There are six scripts on purpose, one per user goal: `file-backup.py` and
 `drive-compare.py` for Drive; `photo-backup.py`, `photo-redate.py`,
