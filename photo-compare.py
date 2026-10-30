@@ -37,6 +37,11 @@ RESULT
   - can't be checked: online-only placeholders whose name holds no date.
     Make the folder available offline and run again.
 
+  Photo libraries (Photos, iPhoto, Aperture: .photoslibrary, ...) are
+  skipped and named: besides the originals they hold previews and
+  thumbnails, which would all look missing. Export the photos first
+  (Photos: File > Export > Export Unmodified Original) and compare that.
+
   Lists are written to --out-dir (default ~/drive-sync-logs). The Proton
   timeline is read with `photo timeline -d -j` and saved there too, as
   proton-photo-timeline.json: --reuse-scan reuses it instead of reading it
@@ -91,6 +96,9 @@ VIDEO_EXT = {".mov", ".mp4", ".m4v", ".avi", ".3gp", ".mkv", ".mts"}
 SF_DATALESS = 0x40000000     # macOS flag on online-only files not materialized
 JUNK_DIRS = {".dropbox.cache", ".Trashes", ".Trash", ".TemporaryItems",
              ".Spotlight-V100", ".fseventsd", "#recycle"}
+# photo libraries (Photos, iPhoto, Aperture): besides the originals they hold
+# previews and thumbnails, which would all look missing. Export first.
+LIBRARY_EXT = (".photoslibrary", ".photolibrary", ".aplibrary")
 
 # "2024-05-03 10.22.11.jpg", "2024-05-03 10.22.11-1.jpg": Dropbox Camera
 # Uploads names files after the local capture time
@@ -178,6 +186,10 @@ def resolve_settings(a):
     for d in a.folders:
         if not os.path.isdir(d):
             sys.exit(f"ERROR: {d} doesn't exist ({where})")
+        if d.rstrip(os.sep).lower().endswith(LIBRARY_EXT):
+            sys.exit(f"ERROR: {d} is a photo library ({where}): besides the originals it "
+                     "holds previews and thumbnails.\n  Export the photos first (Photos: "
+                     "File > Export > Export Unmodified Original) and compare that folder.")
     a.tz = s["tz"] or None
     a.tolerance, a.batch = s["tolerance"], s["batch"]
     a.no_exif = s["exif"] == "no"
@@ -307,12 +319,18 @@ def index_proton(timeline):
 
 # --- local side --------------------------------------------------------------
 
-def scan_local(folders):
+def scan_local(folders, libraries=None):
+    """The photos and videos in the folders. Photo libraries are skipped and
+    appended to `libraries`."""
     files = []
     for root in folders:
         for dirpath, dirnames, filenames in os.walk(root):
+            for d in dirnames:
+                if d.lower().endswith(LIBRARY_EXT) and libraries is not None:
+                    libraries.append(os.path.join(dirpath, d))
             dirnames[:] = [d for d in dirnames
-                           if d not in JUNK_DIRS and not d.startswith(".")]
+                           if d not in JUNK_DIRS and not d.startswith(".")
+                           and not d.lower().endswith(LIBRARY_EXT)]
             for fn in filenames:
                 ext = os.path.splitext(fn)[1].lower()
                 if fn.startswith(".") or (ext not in PHOTO_EXT and ext not in VIDEO_EXT):
@@ -505,7 +523,15 @@ def main():
         print("  WARNING: the timeline has no sha1 (read without -d?): "
               "matching by capture time only.")
 
-    files = scan_local(a.folders)
+    libraries = []
+    files = scan_local(a.folders, libraries)
+    if libraries:
+        print(f"  Skipped {len(libraries)} photo libraries (they also hold previews and "
+              "thumbnails):")
+        for lib in libraries:
+            print(f"     {lib}")
+        print("  To check those photos, export them first (Photos: File > Export >"
+              " Export Unmodified Original) and compare the exported folder.")
     print(f"  {len(files)} local photos and videos "
           f"({sum(1 for f in files if not f['on_disk'])} online-only)")
     match(a, files, by_sha, by_sec, info)

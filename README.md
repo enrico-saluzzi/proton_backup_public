@@ -333,6 +333,9 @@ the profile, or `--tz`, to change it).
   may show up as missing for the same reason.
 - The upload script uses `photo upload -c rename` and skips files that are
   empty when it runs: make the folder **available offline** before running it.
+- Photo libraries (`.photoslibrary` and the like) are skipped and named: they
+  also hold previews and thumbnails. Export the photos first (Photos: File →
+  Export → Export Unmodified Original) and compare the exported folder.
 - The Proton timeline is saved in `~/drive-sync-logs/proton-photo-timeline.json`;
   `--reuse-scan` reuses it instead of reading it again while you iterate,
   like the Drive scan.
