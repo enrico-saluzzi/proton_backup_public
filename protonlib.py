@@ -611,6 +611,10 @@ PROFILE_SETTINGS = {
         ("verify", "yes",
          "yes = recompute the sha1 of every local file: the only check that "
          "catches a corrupted file of the same size (slower)"),
+        ("cleanup", "no",
+         "yes = the backup follows Proton: old copies of files moved on Proton "
+         "are deleted, files deleted on Proton are moved to "
+         ".deleted-on-proton/<date>/ in the backup (empty it by hand)"),
         ("workers", "3",
          "parallel calls to the CLI while scanning Proton"),
         ("batch", "20",
@@ -675,6 +679,7 @@ SETTING_CHOICES = {
     "proton_only": ("hide", "list"),
     "copy_script": ("yes", "no"),
     "verify": ("yes", "no"),
+    "cleanup": ("yes", "no"),
     "albums": ("yes", "no"),
     "exif": ("yes", "no"),
     "upload_script": ("yes", "no"),

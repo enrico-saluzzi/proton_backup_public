@@ -21,6 +21,7 @@ import io
 import json
 import os
 import sys
+import time
 import unicodedata
 import unittest
 from unittest import mock
@@ -266,27 +267,28 @@ class SetupTest(FileBackupTestCase):
         return dict(self.plib.read_config(self.config).items(f"file-backup {name}"))
 
     def test_new_profile_with_explicit_answers(self):
-        rv, out, _ = self.run_setup([self.dest, "/my-files/Work", "no", "4", "10", "600"], "ssd")
+        rv, out, _ = self.run_setup([self.dest, "/my-files/Work", "no", "yes", "4", "10", "600"], "ssd")
         self.assertEqual(rv, 0)
         self.assertEqual(self.saved(), {"dest": self.dest, "proton_root": "/my-files/Work",
-                                        "verify": "no", "workers": "4", "batch": "10",
-                                        "timeout": "600"})
+                                        "verify": "no", "cleanup": "yes", "workers": "4",
+                                        "batch": "10", "timeout": "600"})
         self.assertIn("Saved profile [file-backup ssd]", out)
         self.assertIn("(or ./file-backup.py ssd)", out)
 
     def test_enter_keeps_the_defaults(self):
-        self.run_setup([self.dest] + [""] * 5, "ssd")
+        self.run_setup([self.dest] + [""] * 6, "ssd")
         self.assertEqual(self.saved(), {"dest": self.dest, "proton_root": "/my-files",
-                                        "verify": "yes", "workers": "3", "batch": "20",
-                                        "timeout": "1800"})
+                                        "verify": "yes", "cleanup": "no", "workers": "3",
+                                        "batch": "20", "timeout": "1800"})
 
     def test_new_profile_offers_an_example_dest(self):
-        _, _, prompts = self.run_setup([self.dest] + [""] * 5, "ssd")
+        _, _, prompts = self.run_setup([self.dest] + [""] * 6, "ssd")
         self.assertIn("(/Volumes/MyBackupDisk/proton-files)", prompts[0])
         self.assertIn("verify [yes/no] (yes)", prompts[2])
+        self.assertIn("cleanup [yes/no] (no)", prompts[3])
 
     def test_invalid_answers_are_asked_again(self):
-        _, out, _ = self.run_setup([self.dest, "", "maybe", "no", "0", "x", "2", "", ""], "ssd")
+        _, out, _ = self.run_setup([self.dest, "", "maybe", "no", "", "0", "x", "2", "", ""], "ssd")
         self.assertEqual(self.saved()["verify"], "no")
         self.assertEqual(self.saved()["workers"], "2")
         self.assertIn("answer one of: yes, no", out)
@@ -294,12 +296,12 @@ class SetupTest(FileBackupTestCase):
 
     def test_missing_dest_can_be_kept_anyway(self):
         unplugged = "/Volumes/NotPluggedIn/proton-files"
-        _, out, _ = self.run_setup([unplugged, "yes"] + [""] * 5, "ssd")
+        _, out, _ = self.run_setup([unplugged, "yes"] + [""] * 6, "ssd")
         self.assertEqual(self.saved()["dest"], unplugged)
         self.assertIn("doesn't exist", out)
 
     def test_missing_dest_is_asked_again_when_not_kept(self):
-        self.run_setup(["/Volumes/NotPluggedIn", "no", self.dest] + [""] * 5, "ssd")
+        self.run_setup(["/Volumes/NotPluggedIn", "no", self.dest] + [""] * 6, "ssd")
         self.assertEqual(self.saved()["dest"], self.dest)
 
     def test_current_values_are_offered_as_defaults(self):
@@ -311,13 +313,13 @@ class SetupTest(FileBackupTestCase):
             dest = {self.dest}
             batch = 9
             """)
-        _, _, prompts = self.run_setup([""] * 6, "ssd")
+        _, _, prompts = self.run_setup([""] * 7, "ssd")
         self.assertIn(f"({self.dest})", prompts[0])
         self.assertIn("(no)", prompts[2])
-        self.assertIn("(9)", prompts[4])
+        self.assertIn("(9)", prompts[5])
 
     def test_saved_profile_resolves(self):
-        self.run_setup([self.dest, "", "no", "", "5", ""], "ssd")
+        self.run_setup([self.dest, "", "no", "", "", "5", ""], "ssd")
         a = self.resolve()
         self.assertEqual(a.dest, self.dest)
         self.assertIs(a.verify, False)
@@ -329,7 +331,7 @@ class SetupTest(FileBackupTestCase):
             folder = /data
             winner = ask
             """)
-        self.run_setup([self.dest] + [""] * 5, "ssd")
+        self.run_setup([self.dest] + [""] * 6, "ssd")
         cfg = self.plib.read_config(self.config)
         self.assertEqual(cfg.get("drive-compare dropbox", "winner"), "ask")
         self.assertIn("file-backup ssd", cfg.sections())
@@ -348,7 +350,8 @@ class SetupTest(FileBackupTestCase):
 # 3. End to end, against a fake proton-drive
 # ---------------------------------------------------------------------------
 
-class EndToEndTest(FileBackupTestCase):
+class EndToEndCase(FileBackupTestCase):
+    """A fake Proton Drive, a backup folder and a profile pointing to it."""
 
     def setUp(self):
         super().setUp()
@@ -390,6 +393,9 @@ class EndToEndTest(FileBackupTestCase):
 
     def downloads(self):
         return self.cli_calls("filesystem", "download")
+
+
+class EndToEndTest(EndToEndCase):
 
     def test_first_backup_downloads_everything(self):
         self.profile()
@@ -579,6 +585,156 @@ class EndToEndTest(FileBackupTestCase):
         self.assertEqual(rv, 0)
         self.assertIn("Scan reused", out)
         self.assertEqual(len(self.cli_calls("filesystem", "list")), lists)
+
+
+# ---------------------------------------------------------------------------
+# 4. Cleanup: the backup follows Proton (cleanup = yes)
+# ---------------------------------------------------------------------------
+
+class CleanupTest(EndToEndCase):
+
+    # ten files that stay, so that a few removals are under the 10% limit
+    STAY = {f"Keep/k{i}.txt": f"keep {i}" for i in range(10)}
+
+    def path(self, *parts):
+        return os.path.join(self.dest, *parts)
+
+    def held(self, *parts):
+        return self.path(".deleted-on-proton", time.strftime("%Y-%m-%d"), *parts)
+
+    def first_backup(self, files, **settings):
+        self.profile(cleanup="yes", **settings)
+        self.set_proton(dict(self.STAY, **files))
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+
+    def test_old_copy_of_a_moved_file_is_deleted(self):
+        self.first_backup({"Medical/2023/report.pdf": "blood test"})
+        self.write(self.path("Medical", "2023", ".DS_Store"), "finder")
+        self.set_proton(dict(self.STAY, **{"Health/2023/report.pdf": "blood test"}))
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(self.backup("Health/2023/report.pdf"), "blood test")
+        self.assertFalse(os.path.exists(self.path("Medical")))
+        self.assertIn("Moved on Proton, old copy deleted: 1", out)
+        self.assertIn("Medical/2023/report.pdf\n       -> Health/2023/report.pdf", out)
+        self.assertFalse(os.path.exists(self.path(".deleted-on-proton")))
+
+    def test_renamed_file_keeps_only_the_new_name(self):
+        self.first_backup({"a.txt": "alpha"})
+        self.set_proton(dict(self.STAY, **{"b.txt": "alpha"}))
+        self.run_main()
+        self.assertEqual(self.backup("b.txt"), "alpha")
+        self.assertFalse(os.path.exists(self.path("a.txt")))
+
+    def test_file_deleted_on_proton_is_moved_aside(self):
+        self.first_backup({"Old/Sub/gone.txt": "deleted on Proton"})
+        self.set_proton(dict(self.STAY))
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(self.held("Old", "Sub", "gone.txt")), "deleted on Proton")
+        self.assertFalse(os.path.exists(self.path("Old")))
+        self.assertIn("Deleted on Proton, moved to .deleted-on-proton/", out)
+        self.assertIn("kept aside: 1 files", out)
+
+    def test_files_set_aside_are_not_reported_again(self):
+        self.first_backup({"gone.txt": "deleted on Proton"})
+        self.set_proton(dict(self.STAY))
+        self.run_main()
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertIn("Only in backup (not on Proton) 0", out)
+        self.assertIn("kept aside: 1 files", out)
+
+    def test_same_file_deleted_twice_in_a_day_keeps_both(self):
+        self.first_backup({"gone.txt": "first"})
+        self.set_proton(dict(self.STAY))
+        self.run_main()
+        self.set_proton(dict(self.STAY, **{"gone.txt": "second"}))
+        self.run_main()
+        self.set_proton(dict(self.STAY))
+        self.run_main()
+        self.assertEqual(read(self.held("gone.txt")), "first")
+        self.assertEqual(read(self.held("gone (2).txt")), "second")
+
+    def test_moved_file_whose_new_copy_does_not_match_is_moved_aside(self):
+        # verify = no: the new copy has the right size but other content, so
+        # the old one is the only good copy and must not be deleted
+        self.first_backup({"a.txt": "alpha"}, verify="no")
+        self.write(self.path("b.txt"), "alphX")
+        self.set_proton(dict(self.STAY, **{"b.txt": "alpha"}))
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(self.held("a.txt")), "alpha")
+        self.assertNotIn("old copy deleted", out)
+
+    def test_cleanup_no_keeps_and_reports(self):
+        self.first_backup({"gone.txt": "deleted on Proton"})
+        self.profile(cleanup="no")
+        self.set_proton(dict(self.STAY))
+        _, out = self.run_main()
+        self.assertEqual(self.backup("gone.txt"), "deleted on Proton")
+        self.assertIn("NOT touched, cleanup = no", out)
+
+    def test_command_line_overrides_the_profile(self):
+        self.first_backup({"gone.txt": "deleted on Proton"})
+        self.set_proton(dict(self.STAY))
+        self.run_main("--no-cleanup")
+        self.assertEqual(self.backup("gone.txt"), "deleted on Proton")
+        self.profile()
+        self.run_main("--cleanup")
+        self.assertFalse(os.path.exists(self.path("gone.txt")))
+        self.assertTrue(os.path.exists(self.held("gone.txt")))
+
+    def test_dry_run_shows_the_plan_and_touches_nothing(self):
+        self.first_backup({"a.txt": "alpha", "gone.txt": "deleted on Proton"})
+        self.set_proton(dict(self.STAY, **{"New/a.txt": "alpha"}))
+        calls = len(self.downloads())
+        rv, out = self.run_main("--dry-run")
+        self.assertEqual(rv, 0)
+        self.assertIn("a.txt\n       -> New/a.txt", out)
+        self.assertIn("Deleted on Proton, moved to", out)
+        self.assertIn("(--dry-run: nothing cleaned up)", out)
+        self.assertEqual(len(self.downloads()), calls)
+        self.assertEqual(self.backup("a.txt"), "alpha")
+        self.assertEqual(self.backup("gone.txt"), "deleted on Proton")
+        self.assertFalse(os.path.exists(self.path(".deleted-on-proton")))
+
+    def test_failed_download_skips_the_cleanup(self):
+        self.first_backup({"a.txt": "alpha"})
+        self.set_proton(dict(self.STAY, **{"New/a.txt": "alpha"}), fail=["New/a.txt"])
+        rv, out = self.run_main()
+        self.assertEqual(rv, 1)
+        self.assertIn("Cleanup skipped", out)
+        self.assertEqual(self.backup("a.txt"), "alpha")
+        self.set_proton(fail=[])
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.path("a.txt")))
+        self.assertEqual(self.backup("New/a.txt"), "alpha")
+
+    def test_too_much_to_clean_up_stops_before_downloading(self):
+        self.first_backup({f"Old/f{i}.txt": f"old {i}" for i in range(12)})
+        self.set_proton(dict(self.STAY, **{"new.txt": "new"}))
+        calls = len(self.downloads())
+        self.assertExits(lambda: self.run_main(), "cleanup would take 12 of the 22 files",
+                         "--force-cleanup")
+        self.assertEqual(len(self.downloads()), calls)
+        self.assertEqual(len(os.listdir(self.path("Old"))), 12)
+        rv, _ = self.run_main("--force-cleanup")
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.path("Old")))
+        self.assertEqual(len(os.listdir(self.held("Old"))), 12)
+        self.assertEqual(self.backup("new.txt"), "new")
+
+    def test_a_few_removals_in_a_small_backup_are_allowed(self):
+        self.profile(cleanup="yes")
+        self.set_proton({"a.txt": "alpha", "b.txt": "beta"})
+        self.run_main()
+        self.set_proton({"a.txt": "alpha"})
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertTrue(os.path.exists(self.held("b.txt")))
 
 
 if __name__ == "__main__":

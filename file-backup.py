@@ -23,6 +23,15 @@ WHAT IT DOES
   3. downloads what is missing and what has a different size
   4. verifies (verify = yes, the default): recomputes the local sha1 and
      re-downloads any mismatch
+  5. cleans up (cleanup = yes; off by default), only when every download
+     succeeded, the files in the backup that are no longer on Proton:
+       - moved or renamed on Proton: the old copy is deleted, once the same
+         content is in the backup at its new path (checked by sha1)
+       - deleted on Proton: moved to .deleted-on-proton/<date>/ in the
+         backup, with their path, in case the deletion was a mistake. The
+         script never empties that folder: delete what you no longer need.
+     Folders left empty are removed. If more than 10% of the backup would
+     go, it stops (wrong folder or proton_root?) unless --force-cleanup.
 
   Files are downloaded in batches grouped by destination folder, because the
   CLI downloads into one folder per call. Batches that fail are listed in
@@ -44,7 +53,8 @@ PROFILES
   then back up with ./file-backup.py ssd, or just ./file-backup.py when it's
   the only file-backup profile. A folder path works too, with the defaults.
   Command-line options override the profile. --verify is on by default
-  (verify = yes): turn it off with verify = no or --no-verify.
+  (verify = yes): turn it off with verify = no or --no-verify. --cleanup and
+  --no-cleanup override cleanup.
 
 USAGE
   ./file-backup.py --setup ssd
@@ -55,7 +65,9 @@ USAGE
 
 SAFETY
   Downloads only. Never modifies or deletes anything on Proton.
-  Local files that no longer exist on Proton are reported, never removed.
+  Local files that no longer exist on Proton are only reported, unless
+  cleanup = yes (see step 5): even then a file is deleted only when its
+  content is still in the backup, and the rest is moved aside, not deleted.
 """
 
 import argparse
@@ -69,6 +81,10 @@ import protonlib
 
 SCRIPT = "file-backup"
 HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
+# where cleanup moves the files deleted on Proton, inside the backup folder
+HOLD = ".deleted-on-proton"
+# cleanup stops when it would take away more than this share of the backup
+CLEANUP_MAX = 0.10
 
 
 def parse_args():
@@ -90,13 +106,21 @@ def parse_args():
                    help="recompute the sha1 of every local file (the default)")
     v.add_argument("--no-verify", dest="verify", action="store_const", const="no",
                    help="trust name and size: faster, misses silent corruption")
+    c = g.add_mutually_exclusive_group()
+    c.add_argument("--cleanup", dest="cleanup", action="store_const", const="yes",
+                   help="remove from the backup what is no longer on Proton (see step 5)")
+    c.add_argument("--no-cleanup", dest="cleanup", action="store_const", const="no",
+                   help="only report what is no longer on Proton (the default)")
     g.add_argument("--workers", type=int, help="parallel calls while scanning (default 3)")
     g.add_argument("--batch", type=int, help="files per download call (default 20)")
     g.add_argument("--timeout", type=int, help="timeout per download call, in seconds (default 1800)")
     p.add_argument("--reuse-scan", action="store_true",
                    help="reuse the last complete scan instead of scanning Proton again")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
-    p.add_argument("--dry-run", action="store_true", help="show what would be downloaded")
+    p.add_argument("--force-cleanup", action="store_true",
+                   help="clean up even when more than 10%% of the backup would go")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show what would be downloaded and cleaned up")
     p.add_argument("--max-print", type=int, default=25)
     a = p.parse_args()
     a.config = os.path.expanduser(a.config)
@@ -116,7 +140,7 @@ def resolve_settings(a):
         where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
         if not s["dest"]:
             sys.exit(f"ERROR: {where} has no dest. Run: ./{SCRIPT}.py --setup {name}")
-    for k in ("root", "verify", "workers", "batch", "timeout"):
+    for k in ("root", "verify", "cleanup", "workers", "batch", "timeout"):
         v = getattr(a, k)
         if v is not None:
             s["proton_root" if k == "root" else k] = str(v)
@@ -127,6 +151,7 @@ def resolve_settings(a):
     a.dest = os.path.expanduser(s["dest"])
     a.root = s["proton_root"]
     a.verify = s["verify"] == "yes"
+    a.cleanup = s["cleanup"] == "yes"
     a.workers, a.batch, a.timeout = s["workers"], s["batch"], s["timeout"]
     # a profile's backup folder must already exist: a missing one usually
     # means the external disk isn't plugged in, and creating it would fill
@@ -142,7 +167,7 @@ def setup_questions(cur):
     print("")
     print(f"  {HELP['dest']}")
     new["dest"] = protonlib.ask_existing_folder("dest", cur["dest"] or "/Volumes/MyBackupDisk/proton-files")
-    for k in ("proton_root", "verify", "workers", "batch", "timeout"):
+    for k in ("proton_root", "verify", "cleanup", "workers", "batch", "timeout"):
         print("")
         print(f"  {HELP[k]}")
         new[k] = ask(k, cur[k], protonlib.SETTING_CHOICES.get(k), protonlib.SETTING_MINIMUM.get(k))
@@ -172,6 +197,148 @@ def load_remote(tsv):
     return remote
 
 
+def local_path(dest, rel):
+    """Where the backup keeps the remote file rel, or None if it's missing."""
+    for path in (os.path.join(dest, rel), os.path.join(dest, protonlib.as_local(rel))):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def backup_files(dest):
+    """Files in the backup: normalized relative path -> relative path on disk.
+    Hidden files and the .deleted-on-proton folder are left out."""
+    files = {}
+    for dirpath, dirnames, filenames in os.walk(dest):
+        if dirpath == dest and HOLD in dirnames:
+            dirnames.remove(HOLD)
+        for fn in filenames:
+            if fn.startswith("."):
+                continue
+            rel = os.path.relpath(os.path.join(dirpath, fn), dest)
+            files[protonlib.nfc(rel)] = rel
+    return files
+
+
+def plan_cleanup(a, remote, on_disk, local_only, pending):
+    """Splits the files only in the backup into old copies of files moved on
+    Proton, [(rel, new rel)], and files deleted on Proton, [rel]. A file
+    counts as moved only when a remote file with the same sha1 is in the
+    backup with that content, or is about to be downloaded (pending, for
+    --dry-run)."""
+    by_sha1 = {}
+    for rel, (_, sha1, _) in remote.items():
+        if sha1 and sha1 != "-":
+            by_sha1.setdefault(sha1, []).append(rel)
+    checked = {}
+
+    def in_backup(rel, sha1):
+        if rel in pending:
+            return True
+        if rel not in checked:
+            path = local_path(a.dest, rel)
+            checked[rel] = path is not None and protonlib.sha1_of(path) == sha1
+        return checked[rel]
+
+    moved, deleted = [], []
+    for rel in local_only:
+        h = protonlib.sha1_of(os.path.join(a.dest, on_disk[rel]))
+        new = next((r for r in by_sha1.get(h, []) if in_backup(r, h)), None)
+        if new:
+            moved.append((rel, new))
+        else:
+            deleted.append(rel)
+    return moved, deleted
+
+
+def remove_empty_dirs(dest, folder):
+    """Removes folder and its parents up to dest while they are empty (a
+    Finder .DS_Store doesn't count)."""
+    while folder != dest and folder.startswith(dest + os.sep):
+        try:
+            if os.listdir(folder) == [".DS_Store"]:
+                os.remove(os.path.join(folder, ".DS_Store"))
+            os.rmdir(folder)
+        except OSError:
+            return
+        folder = os.path.dirname(folder)
+
+
+def free_path(path):
+    """path, or path with " (2)", " (3)"... before the extension if it exists."""
+    base, ext = os.path.splitext(path)
+    n = 1
+    while os.path.lexists(path):
+        n += 1
+        path = f"{base} ({n}){ext}"
+    return path
+
+
+def cleanup(a, remote, on_disk, local_only, pending):
+    """Step 5: deletes the old copies of files moved on Proton and moves the
+    files deleted on Proton to .deleted-on-proton/<date>/. Returns the
+    number of files it couldn't handle."""
+    moved, deleted = plan_cleanup(a, remote, on_disk, local_only, pending)
+    hold = os.path.join(a.dest, HOLD, time.strftime("%Y-%m-%d"))
+    print("")
+    if moved:
+        print(f"  Moved on Proton, old copy deleted: {len(moved)}")
+        for old, new in moved[:a.max_print]:
+            print(f"     {old}")
+            print(f"       -> {new}")
+        if len(moved) > a.max_print:
+            print(f"     ... and {len(moved) - a.max_print} more")
+    if deleted:
+        print(f"  Deleted on Proton, moved to {os.path.join(HOLD, os.path.basename(hold))}: "
+              f"{len(deleted)}")
+        for rel in deleted[:a.max_print]:
+            print(f"     {rel}")
+        if len(deleted) > a.max_print:
+            print(f"     ... and {len(deleted) - a.max_print} more")
+    if a.dry_run:
+        print("")
+        print("  (--dry-run: nothing cleaned up)")
+        return 0
+
+    errors = []
+    for rel, _ in moved:
+        path = os.path.join(a.dest, on_disk[rel])
+        try:
+            os.remove(path)
+        except OSError as e:
+            errors.append((rel, e))
+            continue
+        remove_empty_dirs(a.dest, os.path.dirname(path))
+    for rel in deleted:
+        path = os.path.join(a.dest, on_disk[rel])
+        target = free_path(os.path.join(hold, on_disk[rel]))
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.rename(path, target)
+        except OSError as e:
+            errors.append((rel, e))
+            continue
+        remove_empty_dirs(a.dest, os.path.dirname(path))
+    for rel, e in errors:
+        print(f"  ERROR cleaning up {rel}: {e}")
+    return len(errors)
+
+
+def report_hold(dest):
+    """Reminds what the cleanup has moved aside so far."""
+    root = os.path.join(dest, HOLD)
+    count = size = 0
+    for dirpath, _, filenames in os.walk(root):
+        for fn in filenames:
+            if not fn.startswith("."):
+                count += 1
+                size += os.path.getsize(os.path.join(dirpath, fn))
+    if count:
+        print("")
+        print(f"  Deleted on Proton, kept aside: {count} files ({protonlib.human(size)}) in {root}")
+        print("  Delete what you no longer need: the script never empties it.")
+
+
 def main():
     a = parse_args()
     if a.setup:
@@ -192,14 +359,10 @@ def main():
     verified = 0
 
     for rel, (size, sha1, rel_orig) in remote.items():
-        local = os.path.join(a.dest, rel)
-        if not os.path.exists(local):
-            alt = os.path.join(a.dest, protonlib.as_local(rel))
-            if alt != local and os.path.exists(alt):
-                local = alt
-            else:
-                missing.append((rel, size))
-                continue
+        local = local_path(a.dest, rel)
+        if local is None:
+            missing.append((rel, size))
+            continue
         try:
             lsize = os.path.getsize(local)
         except OSError:
@@ -224,15 +387,9 @@ def main():
         sys.stderr.write("\r" + " " * 40 + "\r")
 
     # local files that no longer exist on the remote
-    local_files = set()
-    for dirpath, dirnames, filenames in os.walk(a.dest):
-        for fn in filenames:
-            if fn.startswith("."):
-                continue
-            rel = os.path.relpath(os.path.join(dirpath, fn), a.dest)
-            local_files.add(protonlib.nfc(rel))
+    on_disk = backup_files(a.dest)
     expected = set(remote) | {protonlib.nfc(protonlib.as_local(r)) for r in remote}
-    local_only = sorted(local_files - expected)
+    local_only = sorted(set(on_disk) - expected)
 
     to_download = [(r, s) for r, s in missing] + [(r, s) for r, s, _ in different]
     bytes_to_download = sum(s for _, s in to_download)
@@ -248,19 +405,43 @@ def main():
     print(f"  Only in backup (not on Proton) {len(local_only)}")
     print("=" * 66)
 
-    if local_only:
+    if local_only and a.cleanup and not a.force_cleanup \
+            and len(local_only) > max(10, CLEANUP_MAX * len(on_disk)):
+        sys.exit(f"\nERROR: cleanup would take {len(local_only)} of the {len(on_disk)} files "
+                 f"out of the backup (more than {CLEANUP_MAX:.0%}).\n"
+                 f"  Check the backup folder ({a.dest}) and proton_root ({a.root}).\n"
+                 "  If they are right, run again with --force-cleanup; with --no-cleanup "
+                 "it backs up without cleaning up.")
+
+    if local_only and not a.cleanup:
         print("")
-        print("  In the backup but no longer on Proton (NOT touched):")
+        print("  In the backup but no longer on Proton (NOT touched, cleanup = no):")
         for r in local_only[:a.max_print]:
             print("     " + r)
         if len(local_only) > a.max_print:
             print(f"     ... and {len(local_only) - a.max_print} more")
 
+    failed = 0
     if not to_download:
         print("")
         print("  Backup in sync: nothing to download.")
-        return 0
+    else:
+        failed = download(a, remote, to_download, bytes_to_download)
+    if failed:
+        if a.cleanup and local_only:
+            print("  Cleanup skipped: it runs only when every download succeeded.")
+        return 1
+    if a.cleanup and local_only:
+        pending = {r for r, _ in to_download} if a.dry_run else set()
+        if cleanup(a, remote, on_disk, local_only, pending):
+            return 1
+    report_hold(a.dest)
+    return 0
 
+
+def download(a, remote, to_download, bytes_to_download):
+    """Steps 3-4: downloads the missing and different files. Returns the
+    number of files that failed."""
     print("")
     print(f"  To download: {len(to_download)} files ({protonlib.human(bytes_to_download)})")
     for r, s in to_download[:a.max_print]:
@@ -318,7 +499,7 @@ def main():
                 f.write(f"{rel}\t{e}\n")
         print(f"  List       : {p}")
         print("  Rerun the script: it retries only what is still missing.")
-        return 1
+        return len(failed)
     print("")
     print("  Backup in sync.")
     return 0
