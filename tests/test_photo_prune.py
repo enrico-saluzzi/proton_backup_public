@@ -257,6 +257,26 @@ class EndToEndTest(PhotoPruneTestCase):
         self.run_main("--from-missing", "--apply")
         self.assertEqual(len(self.trash_calls()), 1)
 
+    def deleted_list(self, *rows):
+        self.write(os.path.join(self.dest, "photos-deleted-locally.txt"),
+                   "".join("\t".join(r) + "\n" for r in rows))
+
+    def test_photos_listed_by_photo_backup_are_trashed_too(self):
+        # u3 was deleted before the map remembered it: only the list knows it
+        self.deleted_list(("u3", "old.jpg", "2019"), ("u2", "deleted.jpg", "2023"))
+        rc, out = self.run_main("--from-missing", "--dry-run")
+        self.assertIn("To trash on Proton    : 2", out)
+        self.assertIn("2019/old.jpg", out)
+        rc, _ = self.run_main("--from-missing", "--apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(sorted(c[2] for c in self.trash_calls()), ["/photos/u2", "/photos/u3"])
+
+    def test_listed_photo_back_in_the_backup_is_left_alone(self):
+        self.deleted_list(("u1", "kept.jpg", "2023"))     # downloaded again since
+        rc, _ = self.run_main("--from-missing", "--apply")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.trash_calls(), [["filesystem", "trash", "/photos/u2"]])
+
     def test_refuses_to_empty_an_album(self):
         self.albums([{"uid": "al1", "name": "Trip", "photos": ["u2"]}])
         rc, out = self.run_main("--from-missing", "--apply")
