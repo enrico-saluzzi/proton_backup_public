@@ -613,8 +613,11 @@ PROFILE_SETTINGS = {
          "catches a corrupted file of the same size (slower)"),
         ("cleanup", "yes",
          "yes = the backup follows Proton: old copies of files moved on Proton "
-         "are deleted, files deleted on Proton are moved to "
-         ".deleted-on-proton/<date>/ in the backup (empty it by hand)"),
+         "are deleted, files deleted on Proton are moved to deleted_dir "
+         "(empty it by hand)"),
+        ("deleted_dir", "",
+         "where cleanup moves the files deleted on Proton, one folder per date "
+         "(empty = deleted-on-proton next to the backup folder)"),
         ("workers", "3",
          "parallel calls to the CLI while scanning Proton"),
         ("batch", "20",

@@ -27,9 +27,13 @@ WHAT IT DOES
      succeeded, the files in the backup that are no longer on Proton:
        - moved or renamed on Proton: the old copy is deleted, once the same
          content is in the backup at its new path (checked by sha1)
-       - deleted on Proton: moved to .deleted-on-proton/<date>/ in the
-         backup, with their path, in case the deletion was a mistake. The
-         script never empties that folder: delete what you no longer need.
+       - deleted on Proton: moved to deleted_dir/<date>/, with their path,
+         in case the deletion was a mistake. deleted_dir is by default
+         deleted-on-proton next to the backup folder (e.g.
+         /Volumes/Disk/deleted-on-proton for /Volumes/Disk/proton-files), so
+         it's easy to browse in Finder; when the backup folder is the root
+         of a disk, set it in the profile (--deleted-dir). The script never
+         empties it: delete what you no longer need.
      Folders left empty are removed. If more than 10% of the backup would
      go, it stops (wrong folder or proton_root?) unless --force-cleanup.
 
@@ -72,6 +76,7 @@ SAFETY
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -81,8 +86,9 @@ import protonlib
 
 SCRIPT = "file-backup"
 HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
-# where cleanup moves the files deleted on Proton, inside the backup folder
-HOLD = ".deleted-on-proton"
+# where cleanup moves the files deleted on Proton, next to the backup folder
+# unless deleted_dir says otherwise
+DELETED_DIR = "deleted-on-proton"
 # cleanup stops when it would take away more than this share of the backup
 CLEANUP_MAX = 0.10
 
@@ -112,6 +118,9 @@ def parse_args():
                         "(the default)")
     c.add_argument("--no-cleanup", dest="cleanup", action="store_const", const="no",
                    help="only report what is no longer on Proton")
+    g.add_argument("--deleted-dir",
+                   help="where cleanup moves the files deleted on Proton "
+                        "(default: deleted-on-proton next to the backup folder)")
     g.add_argument("--workers", type=int, help="parallel calls while scanning (default 3)")
     g.add_argument("--batch", type=int, help="files per download call (default 20)")
     g.add_argument("--timeout", type=int, help="timeout per download call, in seconds (default 1800)")
@@ -141,7 +150,7 @@ def resolve_settings(a):
         where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
         if not s["dest"]:
             sys.exit(f"ERROR: {where} has no dest. Run: ./{SCRIPT}.py --setup {name}")
-    for k in ("root", "verify", "cleanup", "workers", "batch", "timeout"):
+    for k in ("root", "verify", "cleanup", "deleted_dir", "workers", "batch", "timeout"):
         v = getattr(a, k)
         if v is not None:
             s["proton_root" if k == "root" else k] = str(v)
@@ -153,12 +162,19 @@ def resolve_settings(a):
     a.root = s["proton_root"]
     a.verify = s["verify"] == "yes"
     a.cleanup = s["cleanup"] == "yes"
+    a.deleted_dir = os.path.expanduser(s["deleted_dir"]) or os.path.join(
+        os.path.dirname(os.path.abspath(a.dest).rstrip(os.sep)), DELETED_DIR)
     a.workers, a.batch, a.timeout = s["workers"], s["batch"], s["timeout"]
     # a profile's backup folder must already exist: a missing one usually
     # means the external disk isn't plugged in, and creating it would fill
     # the internal disk instead
     if name is not None and not os.path.isdir(a.dest):
         sys.exit(f"ERROR: {a.dest} doesn't exist ({where}). Is the disk plugged in?")
+    # next to the root of a disk would mean another disk (/Volumes)
+    if a.cleanup and not s["deleted_dir"] and os.path.ismount(a.dest):
+        sys.exit(f"ERROR: {a.dest} is the root of a disk, so cleanup has no folder next "
+                 f"to it for the files deleted on Proton ({where}).\n"
+                 "  Set deleted_dir (--deleted-dir), e.g. a folder on the same disk.")
     return a
 
 
@@ -168,7 +184,7 @@ def setup_questions(cur):
     print("")
     print(f"  {HELP['dest']}")
     new["dest"] = protonlib.ask_existing_folder("dest", cur["dest"] or "/Volumes/MyBackupDisk/proton-files")
-    for k in ("proton_root", "verify", "cleanup", "workers", "batch", "timeout"):
+    for k in ("proton_root", "verify", "cleanup", "deleted_dir", "workers", "batch", "timeout"):
         print("")
         print(f"  {HELP[k]}")
         new[k] = ask(k, cur[k], protonlib.SETTING_CHOICES.get(k), protonlib.SETTING_MINIMUM.get(k))
@@ -206,13 +222,14 @@ def local_path(dest, rel):
     return None
 
 
-def backup_files(dest):
+def backup_files(dest, deleted_dir):
     """Files in the backup: normalized relative path -> relative path on disk.
-    Hidden files and the .deleted-on-proton folder are left out."""
+    Hidden files and deleted_dir (if it's inside the backup) are left out."""
     files = {}
+    skip = os.path.realpath(deleted_dir)
     for dirpath, dirnames, filenames in os.walk(dest):
-        if dirpath == dest and HOLD in dirnames:
-            dirnames.remove(HOLD)
+        dirnames[:] = [d for d in dirnames
+                       if os.path.realpath(os.path.join(dirpath, d)) != skip]
         for fn in filenames:
             if fn.startswith("."):
                 continue
@@ -277,10 +294,10 @@ def free_path(path):
 
 def cleanup(a, remote, on_disk, local_only, pending):
     """Step 5: deletes the old copies of files moved on Proton and moves the
-    files deleted on Proton to .deleted-on-proton/<date>/. Returns the
-    number of files it couldn't handle."""
+    files deleted on Proton to deleted_dir/<date>/. Returns the number of
+    files it couldn't handle."""
     moved, deleted = plan_cleanup(a, remote, on_disk, local_only, pending)
-    hold = os.path.join(a.dest, HOLD, time.strftime("%Y-%m-%d"))
+    hold = os.path.join(a.deleted_dir, time.strftime("%Y-%m-%d"))
     print("")
     if moved:
         print(f"  Moved on Proton, old copy deleted: {len(moved)}")
@@ -290,8 +307,7 @@ def cleanup(a, remote, on_disk, local_only, pending):
         if len(moved) > a.max_print:
             print(f"     ... and {len(moved) - a.max_print} more")
     if deleted:
-        print(f"  Deleted on Proton, moved to {os.path.join(HOLD, os.path.basename(hold))}: "
-              f"{len(deleted)}")
+        print(f"  Deleted on Proton, moved to {hold}: {len(deleted)}")
         for rel in deleted[:a.max_print]:
             print(f"     {rel}")
         if len(deleted) > a.max_print:
@@ -315,7 +331,7 @@ def cleanup(a, remote, on_disk, local_only, pending):
         target = free_path(os.path.join(hold, on_disk[rel]))
         try:
             os.makedirs(os.path.dirname(target), exist_ok=True)
-            os.rename(path, target)
+            shutil.move(path, target)
         except OSError as e:
             errors.append((rel, e))
             continue
@@ -325,9 +341,8 @@ def cleanup(a, remote, on_disk, local_only, pending):
     return len(errors)
 
 
-def report_hold(dest):
+def report_hold(root):
     """Reminds what the cleanup has moved aside so far."""
-    root = os.path.join(dest, HOLD)
     count = size = 0
     for dirpath, _, filenames in os.walk(root):
         for fn in filenames:
@@ -388,7 +403,7 @@ def main():
         sys.stderr.write("\r" + " " * 40 + "\r")
 
     # local files that no longer exist on the remote
-    on_disk = backup_files(a.dest)
+    on_disk = backup_files(a.dest, a.deleted_dir)
     expected = set(remote) | {protonlib.nfc(protonlib.as_local(r)) for r in remote}
     local_only = sorted(set(on_disk) - expected)
 
@@ -436,7 +451,7 @@ def main():
         pending = {r for r, _ in to_download} if a.dry_run else set()
         if cleanup(a, remote, on_disk, local_only, pending):
             return 1
-    report_hold(a.dest)
+    report_hold(a.deleted_dir)
     return 0
 
 
