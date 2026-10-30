@@ -27,8 +27,9 @@ python3 -m py_compile some-script.py
 python3 -m unittest discover -s tests -v
 ```
 
-Unit tests live in `tests/` (unittest, no pytest), one file per script; so
-far `tests/test_drive_compare.py`. Each test loads the script fresh with
+Unit tests live in `tests/` (unittest, no pytest), one file per module:
+`test_protonlib.py` (configuration and profiles), `test_drive_compare.py`,
+`test_file_backup.py`. Each test loads the script fresh with
 `HOME` set to a temporary folder and talks to a fake `proton-drive` written
 by the test. Add a test with every change to a covered script, and a test
 file when a script gains real logic.
@@ -49,7 +50,9 @@ Exercise the whole chain when a change touches a shared file format.
 ### Shared module: `protonlib.py`
 
 Not a script: helpers used by several scripts (`human`, `sha1_of`, `nfc`,
-`as_local`/`FORBIDDEN_CHARS`, `run_cli`, `DEFAULT_CLI`). Scripts do
+`as_local`/`FORBIDDEN_CHARS`, `run_cli`, `DEFAULT_CLI`), the Drive scan, and
+the configuration file and profiles (`read_config`, `choose_profile`,
+`run_setup`, ...). A new setting goes in `PROFILE_SETTINGS`. Scripts do
 `import protonlib`, which works from any working directory because Python
 puts the running script's directory on `sys.path`. Put anything useful to
 more than one script here instead of copying it.
@@ -64,8 +67,14 @@ protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    start. Incomplete scans keep .state/.queue and resume
                    (within 24 h); complete ones remove them.
 
-drive-compare.py -> reads ~/.config/proton-backup/config.ini (profiles, written
-                   by --setup; config.example.ini documents it) and
+config.ini      -> ~/.config/proton-backup/config.ini (or --config): profiles
+                   [<script> <name>] for file-backup.py and drive-compare.py,
+                   [DEFAULT] shared. Read and written through protonlib
+                   (PROFILE_SETTINGS declares every setting, its default and
+                   its help); --setup rewrites the whole file with comments,
+                   through a symlink if there is one.
+
+drive-compare.py -> reads its profile and
                    ignore-<profile>.txt (appended by the review); writes one
                    report drive-compare-<profile>-<timestamp>.txt and, when
                    there's something to copy, copy-to-proton-*.sh

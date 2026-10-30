@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Enrico Saluzzi
 # SPDX-License-Identifier: MIT
 """
-Unit tests for drive-compare.py: profiles and configuration, the comparison
-rules, the ignore file, trash hints, the interactive review and a few end to
-end runs against a fake proton-drive CLI.
+Unit tests for drive-compare.py: its settings and --setup questions, the
+comparison rules, the ignore file, trash hints, the interactive review and a
+few end to end runs against a fake proton-drive CLI. The configuration file
+itself (profiles, [DEFAULT], writing it back) is tested in test_protonlib.py.
 
 Run from the repository root:
 
@@ -15,158 +16,29 @@ are loaded fresh inside it, so nothing touches the real ~/drive-sync-logs,
 ~/.config/proton-backup or the Proton account.
 """
 
-import configparser
 import contextlib
-import hashlib
-import importlib.util
 import io
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
-import textwrap
-import time
 import unicodedata
 import unittest
 from unittest import mock
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-FAKE_CLI = textwrap.dedent('''\
-    #!/usr/bin/env python3
-    """Fake proton-drive. $FAKE_STATE is a JSON file:
-    {"drive": {"/my-files/a.txt": "content" or ["content", "2024-01-01T00:00:00Z"]},
-     "trash": [{"type": "file", "name": "x", "content": "...", "when": "2026-10-12T10:00:00Z"},
-               {"type": "folder", "name": "Old", "when": "..."}],
-     "trash_fails": false}"""
-    import hashlib, json, os, sys
-    st = json.load(open(os.environ["FAKE_STATE"], encoding="utf-8"))
-    args = sys.argv[1:]
-
-    def node(name, content, mtime):
-        b = content.encode()
-        return {"name": {"ok": True, "value": name}, "type": "file", "uid": "f-" + name,
-                "activeRevision": {"claimedSize": len(b), "claimedModificationTime": mtime,
-                                   "claimedDigests": {"sha1": hashlib.sha1(b).hexdigest()}}}
-
-    if args[:3] == ["filesystem", "list", "/trash"]:
-        if st.get("trash_fails"):
-            print("network error", file=sys.stderr); sys.exit(1)
-        out = []
-        for t in st.get("trash", []):
-            if t["type"] == "file":
-                n = node(t["name"], t["content"], "2024-01-01T00:00:00Z")
-            else:
-                n = {"name": {"ok": True, "value": t["name"]}, "type": "folder", "uid": "d"}
-            n["trashTime"] = t["when"]
-            out.append(n)
-        print(json.dumps(out)); sys.exit(0)
-    if args[:2] == ["filesystem", "list"]:
-        base = args[2].replace("\\\\/", "/").rstrip("/")
-        out, folders = [], set()
-        for path, v in st["drive"].items():
-            content, mtime = (v, "2024-01-01T00:00:00Z") if isinstance(v, str) else v
-            if not path.startswith(base + "/"):
-                continue
-            rest = path[len(base) + 1:]
-            if "/" in rest:
-                folders.add(rest.split("/", 1)[0])
-            else:
-                out.append(node(rest, content, mtime))
-        for d in sorted(folders):
-            out.append({"name": {"ok": True, "value": d}, "type": "folder", "uid": "d-" + d})
-        print(json.dumps(out)); sys.exit(0)
-    print("unknown: " + " ".join(args), file=sys.stderr); sys.exit(2)
-''')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from helpers import FAKE_CLI, FakeStdin, ScriptTestCase, epoch, read, sha1  # noqa: E402
 
 
-def read(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
-
-
-def sha1(text):
-    return hashlib.sha1(text.encode()).hexdigest()
-
-
-def epoch(day):
-    """Epoch seconds of a UTC date such as 2024-01-01."""
-    import calendar
-    return calendar.timegm(time.strptime(day, "%Y-%m-%d"))
-
-
-class FakeStdin:
-    """Stand-in for sys.stdin: only isatty() is used, input() is patched."""
-
-    def __init__(self, tty):
-        self.tty = tty
-
-    def isatty(self):
-        return self.tty
-
-
-class DriveCompareTestCase(unittest.TestCase):
+class DriveCompareTestCase(ScriptTestCase):
     """Loads protonlib and drive-compare.py fresh, with HOME in a temp folder."""
 
+    SCRIPT = ("drive_compare", "drive-compare.py")
+
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.tmp = os.path.realpath(self._tmp.name)
-        self.home = os.path.join(self.tmp, "home")
-        os.makedirs(self.home)
-        env = mock.patch.dict(os.environ, {"HOME": self.home})
-        env.start()
-        self.addCleanup(env.stop)
-        saved = sys.modules.get("protonlib")
-        self.addCleanup(self._restore_protonlib, saved)
-
-        spec = importlib.util.spec_from_file_location("protonlib", os.path.join(REPO, "protonlib.py"))
-        self.plib = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.plib)
-        sys.modules["protonlib"] = self.plib
-        spec = importlib.util.spec_from_file_location(
-            "drive_compare", os.path.join(REPO, "drive-compare.py"))
-        self.dc = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.dc)
-
-        # sanity: everything the module will write lives under the temp HOME
-        self.assertTrue(self.dc.CONFIG_DIR.startswith(self.home))
-        self.assertTrue(self.dc.CLOUD_STORAGE.startswith(self.home))
-        self.assertTrue(self.plib.LOG_DIR.startswith(self.home))
-        self.config = os.path.join(self.home, ".config", "proton-backup", "config.ini")
-
-    def tearDown(self):
-        self._tmp.cleanup()
-
-    @staticmethod
-    def _restore_protonlib(saved):
-        if saved is None:
-            sys.modules.pop("protonlib", None)
-        else:
-            sys.modules["protonlib"] = saved
-
-    # -- helpers ------------------------------------------------------------
-
-    def mkdir(self, *parts):
-        p = os.path.join(self.tmp, *parts)
-        os.makedirs(p, exist_ok=True)
-        return p
-
-    def write(self, path, text, mtime=None):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-        if mtime is not None:
-            os.utime(path, (mtime, mtime))
-        return path
-
-    def write_config(self, text, path=None):
-        path = path or self.config
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(textwrap.dedent(text))
-        return path
+        super().setUp()
+        self.dc = self.mod
 
     def args(self, *argv):
         with mock.patch.object(sys, "argv", ["drive-compare.py", *argv]):
@@ -174,17 +46,6 @@ class DriveCompareTestCase(unittest.TestCase):
 
     def resolve(self, *argv):
         return self.dc.resolve_settings(self.args(*argv, "--config", self.config))
-
-    def assertExits(self, fn, *needles):
-        """fn() must stop with sys.exit, and the message must contain needles."""
-        with contextlib.redirect_stdout(io.StringIO()), \
-                contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                fn()
-        msg = str(cm.exception.code)
-        for n in needles:
-            self.assertIn(n, msg)
-        return msg
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +60,7 @@ class ResolveSettingsTest(DriveCompareTestCase):
 
     def test_profile_name_loads_its_section(self):
         self.write_config(f"""
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             winner = ask
             """)
@@ -207,11 +68,59 @@ class ResolveSettingsTest(DriveCompareTestCase):
         self.assertEqual(s["name"], "dropbox")
         self.assertEqual(s["folder"], self.folder)
         self.assertEqual(s["winner"], "ask")
-        self.assertIn("profile [dropbox]", s["where"])
+        self.assertEqual(s["where"], f"profile [drive-compare dropbox] in {self.config}")
+
+    def test_no_target_uses_the_only_drive_compare_profile(self):
+        self.write_config(f"""
+            [drive-compare dropbox]
+            folder = {self.folder}
+
+            [file-backup ssd]
+            dest = /Volumes/Disk
+            """)
+        self.assertEqual(self.resolve()["name"], "dropbox")
+
+    def test_no_target_with_only_a_file_backup_profile_is_an_error(self):
+        self.write_config("""
+            [file-backup ssd]
+            dest = /Volumes/Disk
+            """)
+        self.assertExits(lambda: self.resolve(), "no drive-compare profile",
+                         "./drive-compare.py --setup NAME")
+
+    def test_no_target_and_no_config_is_an_error(self):
+        self.assertExits(lambda: self.resolve(), "no drive-compare profile")
+
+    def test_no_target_with_several_profiles_is_an_error(self):
+        self.write_config(f"""
+            [drive-compare dropbox]
+            folder = {self.folder}
+
+            [drive-compare disk]
+            folder = {self.folder}
+            """)
+        self.assertExits(lambda: self.resolve(), "several drive-compare profiles")
+
+    def test_config_option_reads_a_file_in_the_current_folder(self):
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.mkdir("work"))
+        self.write_config(f"""
+            [drive-compare here]
+            folder = {self.folder}
+            winner = folder
+            """, path=os.path.join(self.tmp, "work", "my-config.ini"))
+        s = self.dc.resolve_settings(self.args("--config", "my-config.ini"))
+        self.assertEqual(s["name"], "here")
+        self.assertEqual(s["winner"], "folder")
+        self.assertIn("my-config.ini", s["where"])
+
+    def test_default_config_is_in_the_home_config_folder(self):
+        self.assertEqual(self.args("x").config, self.config)
 
     def test_unset_profile_keys_take_the_built_in_defaults(self):
         self.write_config(f"""
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             """)
         s = self.resolve("dropbox")
@@ -230,7 +139,7 @@ class ResolveSettingsTest(DriveCompareTestCase):
             winner = newer
             moved = list
 
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             moved = hide
             """)
@@ -250,18 +159,24 @@ class ResolveSettingsTest(DriveCompareTestCase):
         self.assertEqual(s["compare_by"], "content")
         self.assertEqual(s["where"], "defaults and command line")
 
+    def test_folder_path_ignores_the_profiles(self):
+        self.write_config(f"""
+            [drive-compare dropbox]
+            folder = {self.folder}
+            winner = ask
+            """)
+        self.assertEqual(self.resolve(self.folder)["winner"], "proton")
+
     def test_folder_path_works_without_a_config_file(self):
         self.assertFalse(os.path.exists(self.config))
         s = self.resolve(self.folder)
         self.assertEqual(s["name"], "folder")
         self.assertEqual(s["winner"], "proton")
 
-    def test_path_like_targets_are_never_profiles(self):
-        # a profile and a folder with the same name: "docs" is the profile,
-        # "./docs" the folder
+    def test_path_like_target_is_a_folder_even_with_a_same_named_profile(self):
         docs = self.mkdir("cwd", "docs")
         self.write_config(f"""
-            [docs]
+            [drive-compare docs]
             folder = {self.folder}
             """)
         cwd = os.getcwd()
@@ -278,39 +193,41 @@ class ResolveSettingsTest(DriveCompareTestCase):
     def test_tilde_target_expands_to_home(self):
         dbx = os.path.join(self.home, "Dropbox")
         os.makedirs(dbx)
-        s = self.resolve("~/Dropbox")
-        self.assertEqual(s["folder"], dbx)
+        self.assertEqual(self.resolve("~/Dropbox")["folder"], dbx)
 
-    def test_unknown_profile_lists_profiles_and_suggests_setup(self):
+    def test_unknown_profile_suggests_setup(self):
         self.write_config(f"""
-            [dropbox]
-            folder = {self.folder}
-
-            [ssd]
+            [drive-compare dropbox]
             folder = {self.folder}
             """)
         self.assertExits(lambda: self.resolve("nope"),
-                         "'nope' is neither a profile", "dropbox, ssd",
+                         "'nope' is neither a drive-compare profile", "dropbox",
                          "./drive-compare.py --setup nope")
 
-    def test_unknown_profile_without_config_says_none_yet(self):
-        self.assertExits(lambda: self.resolve("nope"), "profiles: none yet")
+    def test_old_format_section_is_reported(self):
+        self.write_config(f"""
+            [dropbox]
+            folder = {self.folder}
+            """)
+        self.assertExits(lambda: self.resolve("dropbox"), "old format",
+                         "[drive-compare dropbox]")
 
     def test_profile_without_folder_is_an_error(self):
         self.write_config("""
-            [empty]
+            [drive-compare empty]
             winner = ask
             """)
         self.assertExits(lambda: self.resolve("empty"),
-                         "profile [empty]", "has no folder", "--setup empty")
+                         "profile [drive-compare empty]", "has no folder", "--setup empty")
 
     def test_profile_folder_that_does_not_exist_is_an_error(self):
         missing = os.path.join(self.tmp, "Unplugged")
         self.write_config(f"""
-            [disk]
+            [drive-compare disk]
             folder = {missing}
             """)
-        self.assertExits(lambda: self.resolve("disk"), missing, "doesn't exist", "profile [disk]")
+        self.assertExits(lambda: self.resolve("disk"), missing, "doesn't exist",
+                         "profile [drive-compare disk]")
 
     def test_folder_path_that_does_not_exist_is_an_error(self):
         self.assertExits(lambda: self.resolve(os.path.join(self.tmp, "nowhere")),
@@ -319,7 +236,7 @@ class ResolveSettingsTest(DriveCompareTestCase):
     def test_command_line_overrides_the_profile(self):
         pf = self.mkdir("PF")
         self.write_config(f"""
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             proton_root = /my-files
             exclude = A
@@ -347,7 +264,7 @@ class ResolveSettingsTest(DriveCompareTestCase):
 
     def test_legacy_sha1_option_forces_content_comparison(self):
         self.write_config(f"""
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             compare_by = size
             """)
@@ -359,34 +276,24 @@ class ResolveSettingsTest(DriveCompareTestCase):
 
     def test_invalid_choice_names_profile_file_and_allowed_values(self):
         self.write_config(f"""
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             winner = maybe
             """)
         self.assertExits(lambda: self.resolve("dropbox"),
-                         f"profile [dropbox] in {self.config}", "winner = 'maybe'",
-                         "proton, folder, newer, ask")
-
-    def test_every_choice_setting_is_validated(self):
-        for key in ("compare_by", "moved", "proton_only", "copy_script"):
-            with self.subTest(key=key):
-                self.write_config(f"""
-                    [p]
-                    folder = {self.folder}
-                    {key} = bogus
-                    """)
-                self.assertExits(lambda: self.resolve("p"), f"{key} = 'bogus'")
+                         f"profile [drive-compare dropbox] in {self.config}",
+                         "winner = 'maybe'", "proton, folder, newer, ask")
 
     def test_review_max_must_be_a_non_negative_number(self):
         for value in ("abc", "-1", "2.5"):
             with self.subTest(value=value):
                 self.write_config(f"""
-                    [p]
+                    [drive-compare p]
                     folder = {self.folder}
                     review_max = {value}
                     """)
-                self.assertExits(lambda: self.resolve("p"),
-                                 "profile [p]", "review_max must be a number, 0 or more")
+                self.assertExits(lambda: self.resolve("p"), "profile [drive-compare p]",
+                                 "review_max must be a number, 0 or more")
 
     def test_negative_review_max_on_the_command_line_is_an_error(self):
         self.assertExits(lambda: self.resolve(self.folder, "--review-max", "-1"),
@@ -395,48 +302,38 @@ class ResolveSettingsTest(DriveCompareTestCase):
     def test_review_max_zero_is_allowed(self):
         self.assertEqual(self.resolve(self.folder, "--review-max", "0")["review_max"], 0)
 
-    def test_inline_comments_are_stripped_from_values(self):
+    def test_exclude_list_is_split_and_trimmed(self):
         self.write_config(f"""
-            [p]
+            [drive-compare p]
             folder = {self.folder}   ; the cloud folder
-            winner = ask             # decide by hand
-            exclude = Skip, Photos   ; not these
+            exclude = Skip, Photos ,  ; not these
             """)
         s = self.resolve("p")
         self.assertEqual(s["folder"], self.folder)
-        self.assertEqual(s["winner"], "ask")
         self.assertEqual(s["exclude"], {"Skip", "Photos"})
-
-    def test_percent_in_paths_is_taken_literally(self):
-        odd = self.mkdir("100%done")
-        self.write_config(f"""
-            [p]
-            folder = {odd}
-            """)
-        self.assertEqual(self.resolve("p")["folder"], odd)
 
     def test_tilde_in_profile_folder_is_expanded(self):
         dbx = os.path.join(self.home, "Dropbox")
         os.makedirs(dbx)
         self.write_config("""
-            [p]
+            [drive-compare p]
             folder = ~/Dropbox/
             """)
         self.assertEqual(self.resolve("p")["folder"], dbx)
 
     def test_default_ignore_file_is_named_after_the_profile(self):
         self.write_config(f"""
-            [ssd]
+            [drive-compare ssd]
             folder = {self.folder}
             """)
-        self.assertEqual(self.resolve("ssd")["ignore_file"],
-                         os.path.join(self.home, ".config", "proton-backup", "ignore-ssd.txt"))
+        base = os.path.join(self.home, ".config", "proton-backup")
+        self.assertEqual(self.resolve("ssd")["ignore_file"], os.path.join(base, "ignore-ssd.txt"))
         self.assertEqual(self.resolve(self.folder)["ignore_file"],
-                         os.path.join(self.home, ".config", "proton-backup", "ignore-folder.txt"))
+                         os.path.join(base, "ignore-folder.txt"))
 
     def test_ignore_file_setting_overrides_the_default(self):
         self.write_config(f"""
-            [ssd]
+            [drive-compare ssd]
             folder = {self.folder}
             ignore_file = ~/lists/ssd-ignore.txt
             """)
@@ -445,7 +342,7 @@ class ResolveSettingsTest(DriveCompareTestCase):
 
     def test_hand_written_profile_name_is_sanitized_for_file_names(self):
         self.write_config(f"""
-            [my disk!]
+            [drive-compare my disk!]
             folder = {self.folder}
             """)
         s = self.resolve("my disk!")
@@ -453,165 +350,71 @@ class ResolveSettingsTest(DriveCompareTestCase):
         self.assertEqual(s["file_name"], "my_disk")
         self.assertTrue(s["ignore_file"].endswith("ignore-my_disk.txt"))
 
-    def test_missing_target_is_a_usage_error(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as cm:
-                self.args()
-        self.assertEqual(cm.exception.code, 2)
-
-    def test_unreadable_config_is_reported(self):
-        self.write_config("this is not ini\n[ok]\n")
-        self.assertExits(lambda: self.resolve(self.folder), "can't read", self.config)
+    def test_proton_folder_tilde_is_expanded(self):
+        s = self.resolve(self.folder, "--proton-folder", "~/PF")
+        self.assertEqual(s["proton_folder"], os.path.join(self.home, "PF"))
+        self.assertEqual(self.resolve(self.folder)["proton_folder"], "")
 
 
 # ---------------------------------------------------------------------------
-# 2. Writing the configuration
-# ---------------------------------------------------------------------------
-
-class ConfigFileTest(DriveCompareTestCase):
-
-    def make_cfg(self):
-        cfg = self.dc.read_config(os.path.join(self.tmp, "none.ini"))
-        cfg["DEFAULT"]["compare_by"] = "size"
-        cfg.add_section("dropbox")
-        cfg.set("dropbox", "folder", "~/Dropbox")
-        cfg.set("dropbox", "winner", "ask")
-        cfg.set("dropbox", "colour", "blue")    # unknown key, written by hand
-        cfg.add_section("ssd")
-        cfg.set("ssd", "folder", "/Volumes/Disk/100%")
-        return cfg
-
-    def test_round_trip_keeps_every_value(self):
-        self.dc.write_config(self.config, self.make_cfg())
-        back = self.dc.read_config(self.config)
-        self.assertEqual(back.sections(), ["dropbox", "ssd"])
-        self.assertEqual(back.defaults()["compare_by"], "size")
-        self.assertEqual(back.get("dropbox", "folder"), "~/Dropbox")
-        self.assertEqual(back.get("dropbox", "winner"), "ask")
-        self.assertEqual(back.get("dropbox", "colour"), "blue")
-        self.assertEqual(back.get("ssd", "folder"), "/Volumes/Disk/100%")
-        self.assertEqual(back.get("ssd", "compare_by"), "size")    # inherited
-
-    def test_every_known_setting_is_preceded_by_its_explanation(self):
-        text = self.dc.render_config(self.make_cfg())
-        lines = text.splitlines()
-        for key in ("folder", "winner", "compare_by"):
-            i = next(n for n, l in enumerate(lines) if l.startswith(f"{key} = "))
-            self.assertEqual(lines[i - 1], f"; {self.dc.HELP[key]}")
-        self.assertTrue(lines[0].startswith("# drive-compare.py profiles"))
-
-    def test_default_section_is_written_first(self):
-        text = self.dc.render_config(self.make_cfg())
-        self.assertLess(text.index("[DEFAULT]"), text.index("[dropbox]"))
-
-    def test_profiles_keep_only_their_own_keys(self):
-        text = self.dc.render_config(self.make_cfg())
-        dropbox = text.split("[dropbox]")[1].split("[ssd]")[0]
-        self.assertNotIn("compare_by", dropbox)
-
-    def test_unknown_keys_are_kept_after_the_known_ones(self):
-        text = self.dc.render_config(self.make_cfg())
-        dropbox = text.split("[dropbox]")[1].split("[ssd]")[0]
-        self.assertIn("colour = blue", dropbox)
-        self.assertLess(dropbox.index("winner = "), dropbox.index("colour = "))
-
-    def test_write_creates_the_config_folder(self):
-        self.assertFalse(os.path.exists(os.path.dirname(self.config)))
-        self.dc.write_config(self.config, self.make_cfg())
-        self.assertTrue(os.path.isfile(self.config))
-        self.assertEqual(os.listdir(os.path.dirname(self.config)), ["config.ini"])
-
-    def test_write_through_a_symlink_keeps_the_link(self):
-        # e.g. config.ini linked to a file kept in a private repository
-        target = self.write(os.path.join(self.tmp, "private-repo", "config.ini"), "[old]\n")
-        os.makedirs(os.path.dirname(self.config))
-        os.symlink(target, self.config)
-        self.dc.write_config(self.config, self.make_cfg())
-        self.assertTrue(os.path.islink(self.config))
-        self.assertEqual(os.path.realpath(self.config), target)
-        self.assertEqual(self.dc.read_config(target).sections(), ["dropbox", "ssd"])
-        self.assertEqual(os.listdir(os.path.dirname(target)), ["config.ini"])
-
-    def test_failed_write_leaves_the_old_file_untouched(self):
-        self.write_config("[old]\nfolder = /x\n")
-        with mock.patch.object(self.dc.os, "replace", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
-                self.dc.write_config(self.config, self.make_cfg())
-        with open(self.config, encoding="utf-8") as f:
-            self.assertEqual(f.read(), "[old]\nfolder = /x\n")
-
-    def test_example_config_in_the_repo_is_valid(self):
-        example = os.path.join(REPO, "config.example.ini")
-        if not os.path.exists(example):
-            self.skipTest("config.example.ini not in the repository yet")
-        cfg = self.dc.read_config(example)
-        for name in cfg.sections():
-            s = dict(self.dc.DEFAULTS)
-            s.update(cfg.items(name))
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.dc.check_settings(s, f"[{name}] in config.example.ini")
-
-
-# ---------------------------------------------------------------------------
-# 3. --setup
+# 2. --setup: the drive-compare questions
 # ---------------------------------------------------------------------------
 
 class SetupTest(DriveCompareTestCase):
-
-    QUESTIONS = ("folder", "proton_root", "exclude", "compare_by", "winner",
-                 "moved", "proton_only", "copy_script", "review_max")
+    """The questions are asked through main(); the mechanics shared by every
+    script (profile name, Ctrl-C, writing) are tested in test_protonlib.py."""
 
     def setUp(self):
         super().setUp()
         self.folder = self.mkdir("Dropbox")
         self.mkdir("Dropbox", "Photos")
+        self.mkdir("Dropbox", ".hidden")
 
     def run_setup(self, answers, *argv, tty=True):
-        """Run --setup answering in order; returns (exit value, output)."""
-        a = self.args("--setup", *argv, "--config", self.config)
-        it = iter(answers)
-
-        def fake_input(prompt=""):
-            try:
-                ans = next(it)
-            except StopIteration:
-                self.fail(f"unexpected question: {prompt!r}")
-            if isinstance(ans, BaseException):
-                raise ans
-            return ans
-
+        """Run --setup answering in order; returns (exit value, output, prompts)."""
         out = io.StringIO()
-        with mock.patch("builtins.input", fake_input), \
-                mock.patch.object(sys, "stdin", FakeStdin(tty)), \
-                contextlib.redirect_stdout(out):
-            rv = self.dc.setup(a)
-        self.assertEqual(list(it), [], "not every answer was used")
-        return rv, out.getvalue()
+        with mock.patch.object(sys, "argv", ["drive-compare.py", "--setup", *argv,
+                                             "--config", self.config]), \
+                self.answering(answers, tty=tty) as prompts, contextlib.redirect_stdout(out):
+            rv = self.dc.main()
+        return rv, out.getvalue(), prompts
 
-    def saved(self):
-        return self.dc.read_config(self.config)
+    def saved(self, name="dropbox"):
+        return dict(self.plib.read_config(self.config).items(f"drive-compare {name}"))
 
     def test_new_profile_with_explicit_answers(self):
-        rv, out = self.run_setup([self.folder, "/my-files/Dropbox", "Photos", "size",
-                                  "newer", "list", "list", "yes", "5"], "dropbox")
+        rv, out, _ = self.run_setup([self.folder, "/my-files/Dropbox", "Photos", "size",
+                                     "newer", "list", "list", "yes", "5"], "dropbox")
         self.assertEqual(rv, 0)
-        cfg = self.saved()
-        self.assertEqual(dict(cfg.items("dropbox")), {
+        self.assertEqual(self.saved(), {
             "folder": self.folder, "proton_root": "/my-files/Dropbox", "exclude": "Photos",
             "compare_by": "size", "winner": "newer", "moved": "list",
             "proton_only": "list", "copy_script": "yes", "review_max": "5"})
+        self.assertIn("./drive-compare.py", out)
+
+    def test_exclude_question_lists_the_visible_top_level_folders(self):
+        _, out, _ = self.run_setup([self.folder] + [""] * 8, "dropbox")
         self.assertIn("folders in it: Photos", out)
-        self.assertIn("./drive-compare.py dropbox", out)
+        self.assertNotIn(".hidden", out)
 
     def test_enter_keeps_the_defaults(self):
         self.run_setup([self.folder] + [""] * 8, "dropbox")
-        p = dict(self.saved().items("dropbox"))
+        p = self.saved()
         self.assertEqual(p["proton_root"], "/my-files")
         self.assertEqual(p["exclude"], "")
         self.assertEqual(p["compare_by"], "content")
         self.assertEqual(p["winner"], "proton")
         self.assertEqual(p["copy_script"], "no")
         self.assertEqual(p["review_max"], "20")
+
+    def test_none_clears_the_exclude_list(self):
+        self.write_config(f"""
+            [drive-compare dropbox]
+            folder = {self.folder}
+            exclude = Photos
+            """)
+        self.run_setup(["", "", "none"] + [""] * 6, "dropbox")
+        self.assertEqual(self.saved()["exclude"], "")
 
     def test_saved_profile_resolves(self):
         self.run_setup([self.folder, "", "Photos", "", "ask", "", "", "", ""], "dropbox")
@@ -621,72 +424,54 @@ class SetupTest(DriveCompareTestCase):
         self.assertEqual(s["winner"], "ask")
 
     def test_invalid_choice_is_asked_again(self):
-        _, out = self.run_setup([self.folder, "", "", "sha256", "content",
-                                 "always", "folder", "", "", "", ""], "dropbox")
-        self.assertEqual(self.saved().get("dropbox", "winner"), "folder")
+        _, out, _ = self.run_setup([self.folder, "", "", "sha256", "content",
+                                    "always", "folder", "", "", "", ""], "dropbox")
+        self.assertEqual(self.saved()["winner"], "folder")
         self.assertIn("answer one of: content, size", out)
         self.assertIn("answer one of: proton, folder, newer, ask", out)
 
-    def test_review_max_must_be_digits(self):
-        _, out = self.run_setup([self.folder, "", "", "", "", "", "", "", "ten", "-3", "7"],
-                                "dropbox")
-        self.assertEqual(self.saved().get("dropbox", "review_max"), "7")
+    def test_review_max_must_be_a_number(self):
+        _, out, _ = self.run_setup([self.folder, "", "", "", "", "", "", "", "ten", "-3", "7"],
+                                   "dropbox")
+        self.assertEqual(self.saved()["review_max"], "7")
         self.assertEqual(out.count("a number, 0 or more"), 2)
-
-    def test_invalid_profile_name_is_asked_again(self):
-        _, out = self.run_setup(["also bad!", "ssd", self.folder] + [""] * 8, "bad name")
-        self.assertEqual(self.saved().sections(), ["ssd"])
-        self.assertEqual(out.count("letters, digits"), 2)
-
-    def test_profile_name_is_asked_when_missing(self):
-        self.run_setup(["ssd", self.folder] + [""] * 8)
-        self.assertEqual(self.saved().sections(), ["ssd"])
 
     def test_missing_folder_can_be_kept_anyway(self):
         unplugged = "/Volumes/NotPluggedIn/Backup"
-        _, out = self.run_setup([unplugged, "yes"] + [""] * 8, "ssd")
-        self.assertEqual(self.saved().get("ssd", "folder"), unplugged)
+        _, out, _ = self.run_setup([unplugged, "yes"] + [""] * 8, "ssd")
+        self.assertEqual(self.saved("ssd")["folder"], unplugged)
         self.assertIn("doesn't exist", out)
 
     def test_missing_folder_is_asked_again_when_not_kept(self):
         self.run_setup(["/Volumes/NotPluggedIn", "", self.folder] + [""] * 8, "ssd")
-        self.assertEqual(self.saved().get("ssd", "folder"), self.folder)
+        self.assertEqual(self.saved("ssd")["folder"], self.folder)
 
-    def test_changing_a_profile_keeps_the_others(self):
-        self.write_config(f"""
-            [dropbox]
-            folder = {self.folder}
-            winner = ask
-
-            [ssd]
-            folder = /Volumes/Disk
-            moved = list
-            """)
-        _, out = self.run_setup(["", "", "", "", "", "", "", "", ""], "dropbox")
-        cfg = self.saved()
-        self.assertIn("Changing profile [dropbox]", out)
-        self.assertEqual(cfg.get("dropbox", "winner"), "ask")       # Enter kept it
-        self.assertEqual(cfg.get("dropbox", "folder"), self.folder)
-        self.assertEqual(dict(cfg.items("ssd")), {"folder": "/Volumes/Disk", "moved": "list"})
+    def test_new_profile_offers_dropbox_as_folder(self):
+        _, _, prompts = self.run_setup([self.folder] + [""] * 8, "dropbox")
+        self.assertIn("(~/Dropbox)", prompts[0])
 
     def test_current_values_are_offered_as_defaults(self):
         self.write_config(f"""
             [DEFAULT]
             winner = newer
 
-            [dropbox]
+            [drive-compare dropbox]
             folder = {self.folder}
             exclude = Photos
             """)
-        prompts = []
-        a = self.args("--setup", "dropbox", "--config", self.config)
-        with mock.patch("builtins.input", lambda p="": prompts.append(p) or ""), \
-                mock.patch.object(sys, "stdin", FakeStdin(True)), \
-                contextlib.redirect_stdout(io.StringIO()):
-            self.dc.setup(a)
+        _, _, prompts = self.run_setup([""] * 9, "dropbox")
         self.assertIn(f"({self.folder})", prompts[0])
         self.assertIn("(Photos)", prompts[2])
         self.assertIn("(newer)", prompts[4])
+
+    def test_setup_keeps_file_backup_profiles(self):
+        self.write_config("""
+            [file-backup ssd]
+            dest = /Volumes/Disk
+            """)
+        self.run_setup([self.folder] + [""] * 8, "dropbox")
+        cfg = self.plib.read_config(self.config)
+        self.assertEqual(cfg.sections(), ["file-backup ssd", "drive-compare dropbox"])
 
     def test_refuses_without_a_terminal(self):
         self.assertExits(lambda: self.run_setup([], "dropbox", tty=False),
@@ -694,28 +479,13 @@ class SetupTest(DriveCompareTestCase):
         self.assertFalse(os.path.exists(self.config))
 
     def test_ctrl_c_writes_nothing(self):
-        self.assertExits(lambda: self.run_setup([self.folder, "", KeyboardInterrupt()], "dropbox"),
-                         "nothing written")
+        self.assertExits(lambda: self.run_setup([self.folder, "", KeyboardInterrupt()],
+                                                "dropbox"), "nothing written")
         self.assertFalse(os.path.exists(self.config))
-
-    def test_end_of_input_in_a_question_writes_nothing(self):
-        self.assertExits(lambda: self.run_setup([self.folder, "", "", EOFError()], "dropbox"),
-                         "nothing written")
-        self.assertFalse(os.path.exists(self.config))
-
-    def test_ctrl_c_on_an_existing_config_leaves_it_untouched(self):
-        self.write_config(f"[keep]\nfolder = {self.folder}\n")
-        before = read(self.config)
-        self.assertExits(lambda: self.run_setup([KeyboardInterrupt()], "keep"), "nothing written")
-        self.assertEqual(read(self.config), before)
-
-    # the profile-name prompt calls input() directly, outside ask()
-    def test_end_of_input_at_the_profile_name_exits_cleanly(self):
-        self.assertExits(lambda: self.run_setup([EOFError()]), "nothing written")
 
 
 # ---------------------------------------------------------------------------
-# 4. Comparison rules
+# 3. Comparison rules
 # ---------------------------------------------------------------------------
 
 class CompareTest(DriveCompareTestCase):
@@ -1057,7 +827,7 @@ class ScanBothSidesTest(DriveCompareTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. Trash hints
+# 4. Trash hints
 # ---------------------------------------------------------------------------
 
 class TrashHintsTest(DriveCompareTestCase):
@@ -1141,7 +911,7 @@ class TrashHintsTest(DriveCompareTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. Interactive review and the ignore file
+# 5. Interactive review and the ignore file
 # ---------------------------------------------------------------------------
 
 class ReviewTest(DriveCompareTestCase):
@@ -1241,7 +1011,7 @@ class ReviewTest(DriveCompareTestCase):
 
 
 # ---------------------------------------------------------------------------
-# 7. End to end, against a fake proton-drive
+# 6. End to end, against a fake proton-drive
 # ---------------------------------------------------------------------------
 
 class EndToEndTest(DriveCompareTestCase):
@@ -1306,7 +1076,7 @@ class EndToEndTest(DriveCompareTestCase):
     def profile(self, **settings):
         lines = [f"folder = {self.src}", f"proton_folder = {self.pf}"]
         lines += [f"{k} = {v}" for k, v in settings.items()]
-        self.write_config("[disk]\n" + "\n".join(lines) + "\n")
+        self.write_config("[drive-compare disk]\n" + "\n".join(lines) + "\n")
 
     def test_identical_folder_exits_0_with_a_single_report(self):
         self.set_proton({"a.txt": "alpha", "Docs/b.txt": "beta"})
@@ -1528,7 +1298,7 @@ class EndToEndTest(DriveCompareTestCase):
 
     def test_copy_script_refuses_a_proton_folder_that_does_not_match(self):
         other = self.mkdir("Unrelated")
-        self.write_config(f"[disk]\nfolder = {self.src}\nproton_folder = {other}\n"
+        self.write_config(f"[drive-compare disk]\nfolder = {self.src}\nproton_folder = {other}\n"
                           "copy_script = yes\n")
         self.set_proton({"Docs/a.txt": "alpha"})
         self.set_folder({"Docs/a.txt": "alpha", "new.txt": "n"})
