@@ -23,7 +23,7 @@ a ~36,000-photo library onto an external SSD.
    on the repository page):
 
    ```bash
-   git clone https://github.com/nick123421/proton_backup_public.git
+   git clone https://github.com/enrico-saluzzi/proton_backup_public.git
    cd proton_backup_public
    ```
 
