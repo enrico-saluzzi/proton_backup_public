@@ -58,7 +58,7 @@ PROFILES
   then back up with ./photo-backup.py ssd, or just ./photo-backup.py when
   it's the only photo-backup profile. A folder path works too, with the
   defaults. Command-line options override the profile; the per-run ones
-  (--import, --redownload-missing, --limit, --reuse-inventory,
+  (--import, --redownload-missing, --limit, --reuse-scan,
   --skip-failed, --dry-run) only exist on the command line.
 
 USAGE
@@ -132,7 +132,7 @@ def parse_args():
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
     p.add_argument("--limit", type=int, default=0,
                    help="download at most N photos and stop (0 = all)")
-    p.add_argument("--reuse-inventory", action="store_true",
+    p.add_argument("--reuse-scan", action="store_true",
                    help="reuse the timeline and album list saved last time instead of "
                         "reading them from Proton")
     p.add_argument("--skip-failed", action="store_true",
@@ -238,11 +238,13 @@ def year_of(x):
 
 def read_timeline(a):
     path = os.path.join(a.dest, INVENTORY)
-    if a.reuse_inventory and os.path.exists(path):
+    if a.reuse_scan and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         print(f"  Timeline reused: {len(data)} photos")
         return data
+    protonlib.suggest_reuse(path, "The timeline and album list saved in the backup",
+                            "--reuse-scan")
     print("  Reading the timeline from Proton...")
     t0 = time.time()
     try:
@@ -259,15 +261,14 @@ def read_timeline(a):
         sys.exit(f"ERROR: 'photo timeline' output is not valid JSON: {e}")
     print(f"  {len(data)} photos on Proton ({int(time.time() - t0)}s)")
     if not a.dry_run:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+        protonlib.write_json(path, data)
     return data
 
 
 def read_albums(a):
     """[{uid, name, photoCount, photos: [uid...], error}] for every album."""
     path = os.path.join(a.dest, ALBUM_MAP)
-    if a.reuse_inventory and os.path.exists(path):
+    if a.reuse_scan and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             albums = json.load(f)
         print(f"  Album list reused: {len(albums)} albums")
@@ -304,8 +305,7 @@ def read_albums(a):
     sys.stderr.write("\r" + " " * 70 + "\r")
     print(f"  {len(albums)} albums read ({int(time.time() - t0)}s)")
     if not a.dry_run:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(albums, f, ensure_ascii=False, indent=1)
+        protonlib.write_json(path, albums, ensure_ascii=False, indent=1)
     return albums
 
 
@@ -727,8 +727,7 @@ def main():
     for u in still_deleted:
         if u in previous and not os.path.exists(previous[u]):
             saved_map[u] = previous[u]
-    with open(map_path, "w", encoding="utf-8") as f:
-        json.dump(saved_map, f, ensure_ascii=False, indent=1)
+    protonlib.write_json(map_path, saved_map, ensure_ascii=False, indent=1)
 
     unlinked = []
     if a.albums:

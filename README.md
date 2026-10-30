@@ -66,7 +66,13 @@ Drive with a few thousand folders. `--root` picks the
 remote folder (default `/my-files`, the whole Drive). The scan is saved in
 `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
 command stops, and running it again resumes the scan; `--reuse-scan` skips it
-and uses the last complete one.
+and uses the last complete one. A new scan replaces the last complete one
+only when it completes, so stopping it never loses the previous scan. When the
+last complete scan is less than an hour old, the script says so and waits 10
+seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed
+on Proton since. The two scripts share the scan, so only one can scan a given
+folder at a time: the second one stops and says to wait and then use
+`--reuse-scan`.
 
 Both read their choices from **profiles** in one configuration file, shared
 with `photo-backup.py`: `~/.config/proton-backup/config.ini` (another one with
@@ -94,6 +100,13 @@ The photo scripts use profiles too, in the same configuration file:
 with the same name, so it's written once: with a single profile, no name is
 needed at all. Their own sections, `[photo-redate ssd]` for instance with the
 albums to leave alone, are optional.
+
+Like the Drive scan, what the photo scripts read from Proton is saved and
+reusable with the same option, `--reuse-scan`: the timeline and the album
+list (`photo-backup.py`, in the backup folder) and the timeline
+(`photo-compare.py`, in `~/drive-sync-logs`). The same hint appears when the
+saved copy is less than an hour old, and the files are only replaced once
+they're written completely.
 
 The Photos section isn't synced by the desktop client and isn't a filesystem
 path: it only exists through the CLI's `photo` and `album` commands, which is
@@ -283,8 +296,9 @@ the profile, or `--tz`, to change it).
   may show up as missing for the same reason.
 - The upload script uses `photo upload -c rename` and skips files that are
   empty when it runs: make the folder **available offline** before running it.
-- The Proton timeline is saved in `~/drive-sync-logs`; pass it back with
-  `--inventory` to avoid reading it again while you iterate.
+- The Proton timeline is saved in `~/drive-sync-logs/proton-photo-timeline.json`;
+  `--reuse-scan` reuses it instead of reading it again while you iterate,
+  like the Drive scan.
 
 #### Pruning photos
 
@@ -326,14 +340,14 @@ plan you reviewed, and is resumable.
 
 | File | Written by | Used by |
 |---|---|---|
-| `~/drive-sync-logs/<root>.tsv` (the Drive scan; `.state`, `.queue` while incomplete) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
+| `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
 | `.proton-albums.json` | `photo-backup.py --albums` | `photo-prune.py`, `photo-redate.py` |
 | `photos-deleted-locally.txt`, `unrecognized-photos.txt`, `photos-not-downloaded.txt` | `photo-backup.py` | you |
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
-| `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
+| `~/drive-sync-logs/proton-photo-timeline.json` | `photo-compare.py` | `photo-compare.py --reuse-scan` |
 | `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | `file-backup.py`, `drive-compare.py` |
 | `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
 | `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |

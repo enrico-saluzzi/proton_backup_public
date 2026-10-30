@@ -30,7 +30,8 @@ FAKE_CLI = textwrap.dedent('''\
      "trash": [{"type": "file", "name": "x", "content": "...", "when": "2026-10-12T10:00:00Z"},
                {"type": "folder", "name": "Old", "when": "..."}],
      "trash_fails": false,
-     "fail_download": ["/my-files/remote path that makes a download call fail"]}
+     "fail_download": ["/my-files/remote path that makes a download call fail"],
+     "fail_list": ["/my-files/folder whose listing fails"]}
     Every call is appended as a JSON list to $FAKE_STATE.calls."""
     import hashlib, json, os, sys
     st = json.load(open(os.environ["FAKE_STATE"], encoding="utf-8"))
@@ -63,6 +64,8 @@ FAKE_CLI = textwrap.dedent('''\
         print(json.dumps(out)); sys.exit(0)
     if args[:2] == ["filesystem", "list"]:
         base = args[2].replace("\\\\/", "/").rstrip("/")
+        if base in st.get("fail_list", []):
+            print("list failed: network error", file=sys.stderr); sys.exit(1)
         out, folders = [], set()
         for path, v in st["drive"].items():
             content, mtime = content_of(v)
@@ -149,6 +152,7 @@ class ScriptTestCase(unittest.TestCase):
         self.addCleanup(self._restore_protonlib, saved)
 
         self.plib = load_module("protonlib", "protonlib.py")
+        self.plib.REUSE_HINT_WAIT = 0     # no countdown when tests run in a terminal
         sys.modules["protonlib"] = self.plib
         self.mod = load_module(*self.SCRIPT) if self.SCRIPT else None
 

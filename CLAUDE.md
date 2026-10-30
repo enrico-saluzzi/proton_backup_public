@@ -65,8 +65,13 @@ Scripts share state through files, so order matters:
 ```
 protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    flag); called by file-backup.py and drive-compare.py at
-                   start. Incomplete scans keep .state/.queue and resume
-                   (within 24 h); complete ones remove them.
+                   start. A scan writes <tsv>.partial and replaces <tsv>
+                   only when complete (scan_complete() tells which); an
+                   interrupted one keeps .partial/.state/.queue and resumes
+                   (within 24 h). A complete scan younger than an hour gets a
+                   --reuse-scan hint and a 10 s pause in a terminal. <tsv>.lock
+                   (pid) allows one scan per root at a time; a lock whose
+                   process is gone is taken over.
 
 config.ini      -> ~/.config/proton-backup/config.ini (or --config): profiles
                    [<script> <name>] for every script; photo-prune.py and
@@ -90,7 +95,8 @@ photo-backup.py -> .proton-photo-inventory.json (timeline), .proton-photo-state.
 photo-redate.py -> redate-plan.json -> photo-redate.py --apply (reupload-state.json)
 
 photo-compare.py -> reads the timeline itself (`photo timeline -d -j`, saved
-                   to ~/drive-sync-logs) or takes one with --inventory; it
+                   to ~/drive-sync-logs/proton-photo-timeline.json, reused with
+                   --reuse-scan) or takes one with --inventory; it
                    doesn't depend on a photo backup
 ```
 
@@ -138,6 +144,12 @@ These are consequences of real failures, not style:
   `--apply`, shows the list first, and refuses to leave an album empty.
 - **Resumable**: every long operation writes a state file and resumes from
   it. A new phase needs its own checkpoint.
+- **Write state and saved inventories with `protonlib.write_json`** (or a
+  `.partial` file then `os.replace`): an interrupted write must leave the
+  previous version, never a truncated file another script can't read.
+- **One reuse option, `--reuse-scan`**, for anything slow read from Proton
+  (Drive scan, Photos timeline, album list), with `protonlib.suggest_reuse`
+  before reading it again.
 - **Read-only unless stated**: the header's SAFETY section says what a script
   can touch; keep it accurate.
 - **Uploads go through a generated script, never run by the tools**: the
