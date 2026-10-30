@@ -28,7 +28,24 @@ WHAT EACH RUN DOES
      year folder if needed.
   6. with --albums, rebuilds every album as a folder of HARD LINKS: a second,
      album-based view of the same files, using no extra space.
-  7. saves the uid -> file map (.proton-photo-map.json), used by
+  7. cleans up (cleanup = yes, the default), only when every download
+     succeeded, so that the backup follows Proton:
+       - photos deleted on Proton (local files whose content is on Proton
+         no more, e.g. the old versions replaced by photo-redate.py): moved
+         to deleted_dir/<date>/<year>/, in case the deletion was a mistake.
+         A file whose name matches a Proton photo that has no file in the
+         backup is kept instead: it may be a converted copy (--import).
+       - extra copies of a photo already in the backup (same sha1): deleted
+       - with albums: links of photos no longer in their album, and folders
+         of albums deleted on Proton, are removed. A link is only a second
+         name of a photo file; if it was the last copy of its content, it's
+         moved to deleted_dir/<date>/<album folder>/ instead.
+     deleted_dir is by default photos-deleted-on-proton next to the backup
+     folder (for /Volumes/Disk/proton-photos:
+     /Volumes/Disk/photos-deleted-on-proton); the script never empties it.
+     It stops if more than 10% of the backup would go (unless
+     --force-cleanup).
+  8. saves the uid -> file map (.proton-photo-map.json), used by
      photo-prune.py and photo-redate.py, and reports:
      - photos deleted from the backup but still on Proton. Deleted on
        purpose? photo-prune.py --from-missing trashes them on Proton.
@@ -44,8 +61,8 @@ ALBUMS
   Album folders go in album_dir (--album-dir; default: "album" inside the
   backup folder); they must be on the same volume as the photos (symlinks are
   used otherwise). Two different photos of an album with the same file name both
-  appear, the second with a " (1)" suffix. Album folders only grow: to rebuild
-  them cleanly, delete the album folder and run again.
+  appear, the second with a " (1)" suffix. With cleanup = no, album folders
+  only grow: to rebuild them cleanly, delete the album folder and run again.
 
 PROFILES
   The backup folder and the options live in a profile, in the same
@@ -59,7 +76,7 @@ PROFILES
   it's the only photo-backup profile. A folder path works too, with the
   defaults. Command-line options override the profile; the per-run ones
   (--import, --redownload-missing, --limit, --reuse-scan,
-  --skip-failed, --dry-run) only exist on the command line.
+  --skip-failed, --force-cleanup, --dry-run) only exist on the command line.
 
 USAGE
   ./photo-backup.py --setup ssd
@@ -70,8 +87,9 @@ USAGE
 
 SAFETY
   Never modifies or deletes anything on Proton. Locally it adds files, sets
-  dates, moves files between year folders and creates album links: it never
-  deletes a photo.
+  dates, moves files between year folders and creates album links. With
+  cleanup = yes (step 7) it deletes a file or a link only when the same
+  content stays in the backup; everything else goes to deleted_dir.
 """
 
 import argparse
@@ -94,6 +112,9 @@ FAILED = "photos-not-downloaded.txt"
 UNRECOGNIZED = "unrecognized-photos.txt"
 DELETED_LOCALLY = "photos-deleted-locally.txt"
 WORK_DIRS = {"_reupload"}       # photo-redate.py's work folder
+# where cleanup moves the photos deleted on Proton, next to the backup folder
+# unless deleted_dir says otherwise
+DELETED_DIR = "photos-deleted-on-proton"
 
 
 SCRIPT = "photo-backup"
@@ -121,6 +142,15 @@ def parse_args():
     g.add_argument("--album-dir",
                    help="where the album folders go: relative to the backup folder or "
                         "absolute (default: album)")
+    c = g.add_mutually_exclusive_group()
+    c.add_argument("--cleanup", dest="cleanup", action="store_const", const="yes",
+                   help="remove from the backup what is no longer on Proton, see step 7 "
+                        "(the default)")
+    c.add_argument("--no-cleanup", dest="cleanup", action="store_const", const="no",
+                   help="only report what is no longer on Proton")
+    g.add_argument("--deleted-dir",
+                   help="where cleanup moves the photos deleted on Proton "
+                        "(default: photos-deleted-on-proton next to the backup folder)")
     g.add_argument("--batch", type=int,
                    help="photos per CLI call (default 5: bigger batches time out more)")
     g.add_argument("--timeout", type=int,
@@ -137,8 +167,11 @@ def parse_args():
                         "reading them from Proton")
     p.add_argument("--skip-failed", action="store_true",
                    help=f"don't retry the photos listed in {FAILED}")
+    p.add_argument("--force-cleanup", action="store_true",
+                   help="clean up even when more than 10%% of the backup would go")
     p.add_argument("--dry-run", action="store_true",
-                   help="show what would be downloaded, changed and imported")
+                   help="show what would be downloaded, changed, imported and cleaned up")
+    p.add_argument("--max-print", type=int, default=25)
     a = p.parse_args()
     a.config = os.path.expanduser(a.config)
     if a.import_dir:
@@ -159,7 +192,7 @@ def resolve_settings(a):
         where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
         if not s["dest"]:
             sys.exit(f"ERROR: {where} has no dest. Run: ./{SCRIPT}.py --setup {name}")
-    for k in ("albums", "album_dir", "batch", "timeout"):
+    for k in ("albums", "album_dir", "cleanup", "deleted_dir", "batch", "timeout"):
         v = getattr(a, k)
         if v is not None:
             s[k] = str(v)
@@ -171,12 +204,15 @@ def resolve_settings(a):
     a.albums = s["albums"] == "yes"
     a.album_dir = s["album_dir"]
     a.album_base = os.path.join(a.dest, os.path.expanduser(s["album_dir"]))
+    a.cleanup = s["cleanup"] == "yes"
     a.batch, a.timeout = s["batch"], s["timeout"]
     # a profile's backup folder must already exist: a missing one usually
     # means the external disk isn't plugged in, and creating it would fill
     # the internal disk instead
     if name is not None and not os.path.isdir(a.dest):
         sys.exit(f"ERROR: {a.dest} doesn't exist ({where}). Is the disk plugged in?")
+    a.deleted_dir = protonlib.deleted_dir(a.dest, s["deleted_dir"], DELETED_DIR,
+                                          a.cleanup, where)
     return a
 
 
@@ -187,8 +223,9 @@ def setup_questions(cur):
     print(f"  {HELP['dest']}")
     new["dest"] = protonlib.ask_existing_folder(
         "dest", cur["dest"] or "/Volumes/MyBackupDisk/proton-photos")
-    for k in ("albums", "album_dir", "batch", "timeout"):
-        if k == "album_dir" and new["albums"] == "no":
+    for k in ("albums", "album_dir", "cleanup", "deleted_dir", "batch", "timeout"):
+        if (k == "album_dir" and new["albums"] == "no"
+                or k == "deleted_dir" and new["cleanup"] == "no"):
             continue
         print("")
         print(f"  {HELP[k]}")
@@ -312,12 +349,13 @@ def read_albums(a):
 # --- local files -------------------------------------------------------------
 
 def list_local(a):
-    """Every photo file in the backup, outside album and work folders."""
+    """Every photo file in the backup, outside album, work and deleted_dir
+    folders."""
     out = []
-    album_base = os.path.realpath(a.album_base)
+    skip = {os.path.realpath(a.album_base), os.path.realpath(a.deleted_dir)}
     for dp, dn, fn in os.walk(a.dest):
         dn[:] = [d for d in dn if not d.startswith(".") and d not in WORK_DIRS
-                 and os.path.realpath(os.path.join(dp, d)) != album_base]
+                 and os.path.realpath(os.path.join(dp, d)) not in skip]
         for f in fn:
             if f.startswith(".") or f.endswith(".txt") or f.endswith(".json"):
                 continue
@@ -625,6 +663,148 @@ def link_albums(a, albums, photo_map):
     return created, existing, unlinked
 
 
+# --- cleanup: the backup follows Proton ---------------------------------------
+
+def base_name(filename):
+    """'IMG_1 (2).jpg' -> 'img_1.jpg': the name compared as same_name() does."""
+    stem, ext = os.path.splitext(filename)
+    return (re.sub(r" \(\d+\)$", "", stem) + ext).lower()
+
+
+def inode(path):
+    st = os.stat(path)
+    return st.st_dev, st.st_ino
+
+
+def album_leftovers(a, albums, photo_map, expected_sha):
+    """Files in the album folders that are no longer in their album on Proton,
+    or in the folder of an album deleted on Proton. A file stays if it's one
+    of the album's photos (same file, or same content). Albums that were read
+    incompletely are left alone. Returns (leftovers, files looked at)."""
+    wanted, incomplete = {}, set()
+    for x in albums:
+        folder = safe_name(x["name"])
+        wanted.setdefault(folder, set()).update(x["photos"])
+        if x.get("error") or (x.get("photoCount") and len(x["photos"]) != x["photoCount"]):
+            incomplete.add(folder)
+    leftovers, seen = [], 0
+    if not os.path.isdir(a.album_base):
+        return leftovers, seen
+    for folder in sorted(os.listdir(a.album_base)):
+        path = os.path.join(a.album_base, folder)
+        if folder.startswith(".") or not os.path.isdir(path) or folder in incomplete:
+            continue
+        uids = wanted.get(folder, set())
+        inodes = {inode(photo_map[u]) for u in uids
+                  if u in photo_map and os.path.exists(photo_map[u])}
+        hashes = {expected_sha[u] for u in uids if u in expected_sha}
+        for f in sorted(os.listdir(path)):
+            fp = os.path.join(path, f)
+            if f.startswith(".") or not os.path.isfile(fp):
+                continue
+            seen += 1
+            if inode(fp) not in inodes and protonlib.sha1_of(fp) not in hashes:
+                leftovers.append(fp)
+    return leftovers, seen
+
+
+def plan_cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
+    """What step 7 does, as lists of paths:
+      gone   photo files whose content is no longer on Proton: moved aside
+      extra  extra copies of a photo already in the backup: deleted
+      kept   content not on Proton, but named like a Proton photo that has no
+             file in the backup (a converted copy?): left alone
+      links  album files no longer in their album (albums=None: not checked)
+    and the number of files looked at."""
+    proton = set(expected_sha.values())
+    mapped = set(photo_map.values())
+    missing_names = {base_name(name_of(x)) for x in inventory if uid_of(x) not in photo_map}
+    gone, extra, kept = [], [], []
+    for p, h in sorted(local_hashes.items()):
+        if p in mapped or not os.path.exists(p):
+            continue
+        if h in proton:
+            extra.append(p)
+        elif base_name(os.path.basename(p)) in missing_names:
+            kept.append(p)
+        else:
+            gone.append(p)
+    links, seen = ([], 0) if albums is None else album_leftovers(a, albums, photo_map,
+                                                                  expected_sha)
+    return gone, extra, kept, links, len(local_hashes) + seen
+
+
+def print_list(a, title, paths, base):
+    if not paths:
+        return
+    print(f"  {title}: {len(paths)}")
+    for p in paths[:a.max_print]:
+        print("     " + os.path.relpath(p, base))
+    if len(paths) > a.max_print:
+        print(f"     ... and {len(paths) - a.max_print} more")
+
+
+def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
+    """Step 7. Returns False if it stopped or something couldn't be cleaned."""
+    gone, extra, kept, links, total = plan_cleanup(a, inventory, local_hashes, photo_map,
+                                                   albums, expected_sha)
+    hold = os.path.join(a.deleted_dir, time.strftime("%Y-%m-%d"))
+    if not (gone or extra or kept or links):
+        return True
+    print("")
+    print_list(a, f"Deleted on Proton, moved to {hold}", gone, a.dest)
+    print_list(a, "Extra copies of a photo already in the backup, deleted", extra, a.dest)
+    print_list(a, "Album photos no longer in the album, removed", links, a.album_base)
+    print_list(a, "Kept: content not on Proton, but named like a photo missing from "
+                  "the backup (a converted copy?)", kept, a.dest)
+    removed = len(gone) + len(extra) + len(links)
+    if a.dry_run:
+        print("")
+        print("  (--dry-run: nothing cleaned up)")
+        return True
+    if not a.force_cleanup and protonlib.too_much_to_clean(removed, total):
+        print("")
+        print(f"  ERROR: cleanup would take {removed} of the {total} files out of the backup "
+              f"(more than {protonlib.CLEANUP_MAX:.0%}), so it didn't.")
+        print(f"  Check the backup folder ({a.dest}) and the albums folder.")
+        print("  If they are right, run again with --force-cleanup.")
+        return False
+
+    # content that stays somewhere: an album file with it is just another name
+    kept_content = {expected_sha[u] for u in photo_map if u in expected_sha}
+    kept_content |= {local_hashes[p] for p in kept}
+    errors = []
+    for p in gone:
+        try:
+            protonlib.move_aside(p, os.path.join(hold, os.path.relpath(p, a.dest)))
+            kept_content.add(local_hashes[p])
+            protonlib.remove_empty_dirs(a.dest, os.path.dirname(p))
+        except OSError as e:
+            errors.append((p, e))
+    for p in extra:
+        try:
+            os.remove(p)
+            protonlib.remove_empty_dirs(a.dest, os.path.dirname(p))
+        except OSError as e:
+            errors.append((p, e))
+    album_dir = os.path.basename(os.path.normpath(a.album_base))
+    for p in links:
+        try:
+            h = protonlib.sha1_of(p)
+            if h in kept_content:
+                os.remove(p)
+            else:       # the last copy of this content: set it aside
+                protonlib.move_aside(p, os.path.join(hold, album_dir,
+                                                     os.path.relpath(p, a.album_base)))
+                kept_content.add(h)
+            protonlib.remove_empty_dirs(a.album_base, os.path.dirname(p))
+        except OSError as e:
+            errors.append((p, e))
+    for p, e in errors:
+        print(f"  ERROR cleaning up {p}: {e}")
+    return not errors
+
+
 # --- main --------------------------------------------------------------------
 
 def main():
@@ -701,6 +881,17 @@ def main():
         print(f"  Deleted from the backup, still on Proton: {len(deleted_locally)}")
         print(f"  Local files matching no Proton photo: "
               f"{sum(1 for h in local_hashes.values() if h not in proton_hashes)}")
+        if a.cleanup:
+            # albums from the list saved last time: --dry-run doesn't read them
+            albums = None
+            saved_albums = os.path.join(a.dest, ALBUM_MAP)
+            if a.albums and os.path.exists(saved_albums):
+                with open(saved_albums, encoding="utf-8") as f:
+                    albums = json.load(f)
+                print("  (albums compared with the list saved last time: "
+                      "--dry-run doesn't read them)")
+            cleanup(a, inventory, local_hashes, build_map(inventory, local_hashes),
+                    albums, expected_sha)
         print("")
         print("  (--dry-run: nothing downloaded, moved or linked)")
         return 0
@@ -729,11 +920,19 @@ def main():
             saved_map[u] = previous[u]
     protonlib.write_json(map_path, saved_map, ensure_ascii=False, indent=1)
 
-    unlinked = []
+    unlinked, albums = [], None
     if a.albums:
         print("")
         albums = read_albums(a)
         created, existing, unlinked = link_albums(a, albums, photo_map)
+
+    cleaned = True
+    if a.cleanup:
+        if failed or (a.limit and downloaded >= a.limit):
+            print("")
+            print("  Cleanup skipped: it runs only when every download succeeded.")
+        else:
+            cleaned = cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha)
 
     unrecognized = sorted(p for p, h in local_hashes.items()
                           if h not in proton_hashes and os.path.exists(p))
@@ -773,11 +972,15 @@ def main():
     if still_deleted:
         print("")
         print("  Some photos were deleted from the backup but are still on Proton.")
-        print("  Deleted on purpose?  ./photo-prune.py DEST --from-missing")
+        print("  Deleted on purpose?  ./photo-prune.py "
+              + (a.profile if a.profile is not None else a.dest) + " --from-missing")
         print("  Lost by accident?    run again with --redownload-missing")
+    protonlib.report_deleted_dir(a.deleted_dir)
     if failed:
         print("")
         print("  Some downloads failed: run again, it retries only those.")
+        return 1
+    if not cleaned:
         return 1
     print("")
     print("  Backup complete.")

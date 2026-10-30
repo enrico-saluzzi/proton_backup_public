@@ -153,9 +153,9 @@ Then, every month:
   - a file **moved or renamed** on Proton: its old copy is deleted, once the
     same content (sha1) is in the backup at the new path;
   - a file **deleted** on Proton: it's moved, with its path, to
-    `deleted-on-proton/<date>/` next to the backup folder (e.g.
-    `/Volumes/Disk/deleted-on-proton` for `/Volumes/Disk/proton-files`), in
-    case the deletion was a mistake. Another folder: `deleted_dir` in the
+    `files-deleted-on-proton/<date>/` next to the backup folder (e.g.
+    `/Volumes/Disk/files-deleted-on-proton` for `/Volumes/Disk/proton-files`),
+    in case the deletion was a mistake. Another folder: `deleted_dir` in the
     profile, needed when the backup folder is the root of a disk. The script
     never empties it and reminds you of its size at every run: delete what
     you no longer need.
@@ -275,11 +275,30 @@ chronological order, and `proton-albums/<album>/` organized like on Proton.
   links. `--no-albums` skips them for one run.
 - If the disk isn't plugged in, the script stops instead of creating the
   backup folder on the internal disk.
+- The backup follows Proton (`cleanup = yes`, the default; `cleanup = no`
+  or `--no-cleanup` turns it off), with the same rules as the file backup:
+  - a photo **deleted** on Proton (a local file whose content is no longer
+    on Proton, e.g. the old version of a photo re-dated with
+    `photo-redate.py`) is moved to `photos-deleted-on-proton/<date>/<year>/`
+    next to the backup folder (`deleted_dir` for another place). A file
+    named like a Proton photo that has no file in the backup is kept
+    instead: it may be a copy converted by the browser (`--import`);
+  - an **extra copy** of a photo already in the backup (same sha1) is
+    deleted;
+  - **album folders** lose the photos no longer in their album, and the
+    folders of albums deleted on Proton go. These are only links to the
+    photo files; one that was the last copy of a photo goes to
+    `photos-deleted-on-proton` instead.
+
+  It runs only after every download succeeded and stops if more than 10%
+  of the backup would go (`--force-cleanup`). `--dry-run` shows it, with the
+  albums as they were at the last run.
 - The summary reports, with a full list next to the photos:
   - photos **deleted from the backup but still on Proton**: deleted on
     purpose, see *Pruning photos*; by accident, run again with
     `--redownload-missing`;
-  - **local files that match no Proton photo** (`unrecognized-photos.txt`).
+  - **local files that match no Proton photo** (`unrecognized-photos.txt`):
+    with cleanup on, only the ones it kept.
 - Photos that can't be downloaded through the CLI (typically iOS edits,
   `_modified`) can be downloaded by hand from the web interface and added with
   `--import ~/Downloads`.

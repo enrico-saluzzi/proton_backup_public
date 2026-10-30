@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -380,41 +381,51 @@ class SetupTest(PhotoBackupTestCase):
         return dict(self.plib.read_config(self.config).items(f"photo-backup {name}"))
 
     def test_new_profile_with_explicit_answers(self):
-        rv, out, _ = self.run_setup([self.dest, "yes", self.albums, "3", "60"], "ssd")
+        rv, out, _ = self.run_setup([self.dest, "yes", self.albums, "yes", "/Disk/old",
+                                     "3", "60"], "ssd")
         self.assertEqual(rv, 0)
         self.assertEqual(self.saved(), {"dest": self.dest, "albums": "yes",
-                                        "album_dir": self.albums, "batch": "3",
+                                        "album_dir": self.albums, "cleanup": "yes",
+                                        "deleted_dir": "/Disk/old", "batch": "3",
                                         "timeout": "60"})
         self.assertIn("Saved profile [photo-backup ssd]", out)
         self.assertIn("(or ./photo-backup.py ssd)", out)
 
     def test_enter_keeps_the_defaults_and_skips_album_dir(self):
-        _, _, prompts = self.run_setup([self.dest, "", "", ""], "ssd")
-        self.assertEqual(self.saved(), {"dest": self.dest, "albums": "no",
-                                        "batch": "5", "timeout": "300"})
+        _, _, prompts = self.run_setup([self.dest] + [""] * 5, "ssd")
+        self.assertEqual(self.saved(), {"dest": self.dest, "albums": "no", "cleanup": "yes",
+                                        "deleted_dir": "", "batch": "5", "timeout": "300"})
         self.assertFalse(any(p.strip().startswith("album_dir") for p in prompts))
 
     def test_album_dir_is_asked_only_when_albums_is_yes(self):
-        _, _, prompts = self.run_setup([self.dest, "yes", "", "", ""], "ssd")
+        _, _, prompts = self.run_setup([self.dest, "yes"] + [""] * 5, "ssd")
         self.assertTrue(prompts[2].strip().startswith("album_dir"))
         self.assertIn("(album)", prompts[2])
         self.assertEqual(self.saved()["album_dir"], "album")
 
     def test_new_profile_offers_an_example_dest(self):
-        _, _, prompts = self.run_setup([self.dest, "", "", ""], "ssd")
+        _, _, prompts = self.run_setup([self.dest] + [""] * 5, "ssd")
         self.assertIn("(/Volumes/MyBackupDisk/proton-photos)", prompts[0])
         self.assertIn("albums [yes/no] (no)", prompts[1])
+        self.assertIn("cleanup [yes/no] (yes)", prompts[2])
+
+    def test_deleted_dir_is_asked_only_when_cleanup_is_yes(self):
+        _, _, prompts = self.run_setup([self.dest, "", "no", "", ""], "ssd")
+        self.assertEqual(self.saved()["cleanup"], "no")
+        self.assertNotIn("deleted_dir", self.saved())
+        self.assertFalse(any(p.strip().startswith("deleted_dir") for p in prompts))
 
     def test_invalid_answers_are_asked_again(self):
-        _, out, _ = self.run_setup([self.dest, "maybe", "no", "0", "x", "4", "-1", "90"], "ssd")
-        self.assertEqual(self.saved(), {"dest": self.dest, "albums": "no",
-                                        "batch": "4", "timeout": "90"})
+        _, out, _ = self.run_setup([self.dest, "maybe", "no", "", "", "0", "x", "4", "-1", "90"],
+                                   "ssd")
+        self.assertEqual(self.saved(), {"dest": self.dest, "albums": "no", "cleanup": "yes",
+                                        "deleted_dir": "", "batch": "4", "timeout": "90"})
         self.assertIn("answer one of: yes, no", out)
         self.assertEqual(out.count("a number, 1 or more"), 3)
 
     def test_missing_dest_can_be_kept_anyway(self):
         unplugged = "/Volumes/NotPluggedIn/proton-photos"
-        _, out, _ = self.run_setup([unplugged, "yes", "", "", ""], "ssd")
+        _, out, _ = self.run_setup([unplugged, "yes"] + [""] * 5, "ssd")
         self.assertEqual(self.saved()["dest"], unplugged)
         self.assertIn("doesn't exist", out)
 
@@ -428,14 +439,14 @@ class SetupTest(PhotoBackupTestCase):
             albums = yes
             album_dir = {self.albums}
             """)
-        _, _, prompts = self.run_setup([""] * 5, "ssd")
+        _, _, prompts = self.run_setup([""] * 7, "ssd")
         self.assertIn(f"({self.dest})", prompts[0])
         self.assertIn("(yes)", prompts[1])
         self.assertIn(f"({self.albums})", prompts[2])
-        self.assertIn("(45)", prompts[4])
+        self.assertIn("(45)", prompts[6])
 
     def test_saved_profile_resolves(self):
-        self.run_setup([self.dest, "yes", self.albums, "2", ""], "ssd")
+        self.run_setup([self.dest, "yes", self.albums, "", "", "2", ""], "ssd")
         a = self.resolve()
         self.assertEqual(a.dest, self.dest)
         self.assertIs(a.albums, True)
@@ -452,7 +463,7 @@ class SetupTest(PhotoBackupTestCase):
             folder = /data
             winner = ask
             """)
-        self.run_setup([self.dest, "", "", ""], "ssd")
+        self.run_setup([self.dest] + [""] * 5, "ssd")
         cfg = self.plib.read_config(self.config)
         self.assertEqual(cfg.get("file-backup ssd", "verify"), "no")
         self.assertEqual(cfg.get("drive-compare dropbox", "winner"), "ask")
@@ -480,7 +491,8 @@ PHOTOS = [
 ALBUMS = [{"uid": "al1", "name": "Holidays", "photos": ["u1", "u2"]}]
 
 
-class EndToEndTest(PhotoBackupTestCase):
+class EndToEndCase(PhotoBackupTestCase):
+    """A fake Proton Photos, a backup folder and a profile pointing to it."""
 
     def setUp(self):
         super().setUp()
@@ -516,6 +528,9 @@ class EndToEndTest(PhotoBackupTestCase):
 
     def timeline_calls(self):
         return self.cli_calls("photo", "timeline")
+
+
+class EndToEndTest(EndToEndCase):
 
     def test_reuse_scan_reuses_the_saved_timeline_and_albums(self):
         self.profile(albums="yes", album_dir=self.album_dir)
@@ -660,6 +675,223 @@ class EndToEndTest(PhotoBackupTestCase):
         self.assertEqual(sorted(photo_map), ["u1", "u2", "u3"])
         for p in PHOTOS:
             self.assertEqual(sha1(read(photo_map[p["uid"]])), sha1(p["content"]))
+
+
+# ---------------------------------------------------------------------------
+# Cleanup: the backup follows Proton (cleanup = yes, the default)
+# ---------------------------------------------------------------------------
+
+class CleanupTest(EndToEndCase):
+
+    def setUp(self):
+        super().setUp()
+        self.held_root = os.path.join(self.tmp, "Disk", "photos-deleted-on-proton")
+
+    def held(self, *parts):
+        return os.path.join(self.held_root, time.strftime("%Y-%m-%d"), *parts)
+
+    def photo(self, *parts):
+        return os.path.join(self.dest, *parts)
+
+    def album(self, name="Holidays"):
+        folder = os.path.join(self.album_dir, name)
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else None
+
+    def with_albums(self, **settings):
+        self.profile(albums="yes", album_dir=self.album_dir, **settings)
+
+    def test_photo_deleted_on_proton_is_moved_aside(self):
+        self.profile()
+        self.run_main()
+        self.set_state(PHOTOS[:2], ALBUMS)
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.photo("2023", "cake.jpg")))
+        self.assertEqual(read(self.held("2023", "cake.jpg")), "cake pixels")
+        self.assertIn(f"Deleted on Proton, moved to {self.held()}: 1", out)
+        self.assertIn("kept aside: 1 files", out)
+        self.assertEqual(read(self.photo("unrecognized-photos.txt")), "")
+        _, out = self.run_main()
+        self.assertNotIn("Deleted on Proton, moved to", out)
+
+    def test_old_version_replaced_on_proton_leaves_the_album_too(self):
+        # what photo-redate.py does: the same picture uploaded again with
+        # another date (other content), the old one trashed
+        self.with_albums()
+        self.run_main()
+        new_beach = {"uid": "u9", "name": "beach.jpg", "content": "beach pixels, 2009",
+                     "capture": "2009-07-14T09:00:00Z"}
+        self.set_state([new_beach] + PHOTOS[1:],
+                       [{"uid": "al1", "name": "Holidays", "photos": ["u9", "u2"]}])
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(self.photo("2009", "beach.jpg")), "beach pixels, 2009")
+        self.assertFalse(os.path.exists(self.photo("2021")))
+        self.assertEqual(read(self.held("2021", "beach.jpg")), "beach pixels")
+        self.assertEqual(self.album(), ["beach (1).jpg", "snow.jpg"])
+        self.assertEqual(read(os.path.join(self.album_dir, "Holidays", "beach (1).jpg")),
+                         "beach pixels, 2009")
+        self.assertIn("Album photos no longer in the album, removed: 1", out)
+
+    def test_extra_copy_of_a_photo_is_deleted(self):
+        self.profile()
+        self.run_main()
+        self.write(self.photo("2023", "snow copy.jpg"), "snow pixels")
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.photo("2023", "snow copy.jpg")))
+        self.assertEqual(read(self.photo("2023", "snow.jpg")), "snow pixels")
+        self.assertIn("Extra copies of a photo already in the backup, deleted: 1", out)
+        self.assertFalse(os.path.exists(self.held_root))
+
+    def test_two_proton_photos_with_the_same_content_keep_their_files(self):
+        twins = [{"uid": "t1", "name": "twin.jpg", "content": "same", "capture": "2022-01-01T00:00:00Z"},
+                 {"uid": "t2", "name": "twin.jpg", "content": "same", "capture": "2022-01-01T00:00:00Z"}]
+        self.set_state(PHOTOS + twins, ALBUMS)
+        self.profile()
+        self.run_main()
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(sorted(os.listdir(self.photo("2022"))), ["twin (1).jpg", "twin.jpg"])
+        self.assertNotIn("deleted:", out)
+
+    def test_photo_removed_from_an_album_leaves_the_album_folder_only(self):
+        self.with_albums()
+        self.run_main()
+        self.set_state(PHOTOS, [{"uid": "al1", "name": "Holidays", "photos": ["u1"]}])
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(self.album(), ["beach.jpg"])
+        self.assertEqual(read(self.photo("2023", "snow.jpg")), "snow pixels")
+        self.assertFalse(os.path.exists(self.held_root))
+
+    def test_album_deleted_on_proton_loses_its_folder(self):
+        self.with_albums()
+        self.run_main()
+        self.write(os.path.join(self.album_dir, "Holidays", ".DS_Store"), "finder")
+        self.set_state(PHOTOS, [])
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertIsNone(self.album())
+        self.assertEqual(read(self.photo("2021", "beach.jpg")), "beach pixels")
+
+    def test_album_file_that_is_the_last_copy_is_moved_aside(self):
+        self.with_albums()
+        self.run_main()
+        os.remove(self.photo("2023", "snow.jpg"))       # deleted from the backup
+        self.set_state(PHOTOS, [])                      # and its album deleted on Proton
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertIsNone(self.album())
+        self.assertEqual(read(self.held("proton-albums", "Holidays", "snow.jpg")), "snow pixels")
+
+    def test_album_read_incompletely_is_left_alone(self):
+        self.with_albums()
+        self.run_main()
+        saved = self.photo(".proton-albums.json")
+        albums = json.loads(read(saved))
+        albums[0].update(photos=["u1"], error="timed out")
+        with open(saved, "w", encoding="utf-8") as f:
+            json.dump(albums, f)
+        rv, _ = self.run_main("--reuse-scan")
+        self.assertEqual(rv, 0)
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+
+    def test_converted_copy_of_a_photo_missing_from_the_backup_is_kept(self):
+        self.set_state(PHOTOS, ALBUMS, fail=["u3"])
+        self.profile()
+        self.run_main()
+        inbox = self.mkdir("Downloads")
+        self.write(os.path.join(inbox, "cake.jpg"), "cake, converted by the browser")
+        rv, out = self.run_main("--import", inbox)
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(self.photo("2023", "cake.jpg")), "cake, converted by the browser")
+        self.assertIn("Kept: content not on Proton, but named like a photo missing", out)
+        self.assertFalse(os.path.exists(self.held_root))
+
+    def test_failed_download_skips_the_cleanup(self):
+        self.profile()
+        self.run_main()
+        self.set_state(PHOTOS[:2] + [{"uid": "u4", "name": "new.jpg", "content": "new",
+                                      "capture": "2024-01-01T00:00:00Z"}], ALBUMS, fail=["u4"])
+        rv, out = self.run_main()
+        self.assertEqual(rv, 1)
+        self.assertIn("Cleanup skipped", out)
+        self.assertEqual(read(self.photo("2023", "cake.jpg")), "cake pixels")
+
+    def test_cleanup_no_keeps_everything(self):
+        self.with_albums(cleanup="no")
+        self.run_main()
+        self.set_state(PHOTOS[1:], [])
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(self.photo("2021", "beach.jpg")), "beach pixels")
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+        self.assertIn("Local files matching no Proton photo: 1", out)
+        rv, _ = self.run_main("--cleanup")
+        self.assertFalse(os.path.exists(self.photo("2021", "beach.jpg")))
+        self.assertIsNone(self.album())
+
+    def test_dry_run_shows_the_plan_and_touches_nothing(self):
+        self.with_albums()
+        self.run_main()
+        self.set_state(PHOTOS[1:], [])
+        album_calls = len(self.cli_calls("album"))
+        rv, out = self.run_main("--dry-run")
+        self.assertEqual(rv, 0)
+        self.assertIn("Deleted on Proton, moved to", out)
+        self.assertIn("2021/beach.jpg", out)
+        # albums: the list saved by the first run, where Holidays still exists
+        self.assertIn("albums compared with the list saved last time", out)
+        self.assertIn("Album photos no longer in the album, removed: 1", out)
+        self.assertIn("(--dry-run: nothing cleaned up)", out)
+        self.assertEqual(len(self.cli_calls("album")), album_calls)
+        self.assertEqual(read(self.photo("2021", "beach.jpg")), "beach pixels")
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+        self.assertFalse(os.path.exists(self.held_root))
+
+    def test_too_much_to_clean_up_stops(self):
+        many = [{"uid": f"m{i}", "name": f"m{i}.jpg", "content": f"m{i}",
+                 "capture": "2020-01-01T00:00:00Z"} for i in range(12)]
+        self.set_state(PHOTOS + many, ALBUMS)
+        self.profile()
+        self.run_main()
+        self.set_state(PHOTOS, ALBUMS)
+        rv, out = self.run_main()
+        self.assertEqual(rv, 1)
+        self.assertIn("cleanup would take 12 of the 15 files", out)
+        self.assertIn("--force-cleanup", out)
+        self.assertEqual(len(os.listdir(self.photo("2020"))), 12)
+        rv, _ = self.run_main("--force-cleanup")
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(self.photo("2020")))
+        self.assertEqual(len(os.listdir(self.held("2020"))), 12)
+
+    def test_deleted_dir_inside_the_backup_is_left_out(self):
+        inside = self.photo("Set aside")
+        self.profile(deleted_dir=inside)
+        self.run_main()
+        self.set_state(PHOTOS[:2], ALBUMS)
+        self.run_main()
+        rv, out = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertEqual(read(os.path.join(inside, time.strftime("%Y-%m-%d"), "2023", "cake.jpg")),
+                         "cake pixels")
+        self.assertNotIn("matching no Proton photo", out)
+
+    def test_backup_at_the_root_of_a_disk_needs_a_deleted_dir(self):
+        self.profile()
+        dest = self.dest
+        with mock.patch.object(os.path, "ismount", lambda p: p == dest):
+            self.assertExits(lambda: self.run_main(), "is the root of a disk", "Set deleted_dir")
+            self.assertEqual(self.timeline_calls(), [])
+
+    def test_prune_hint_names_the_profile(self):
+        self.profile()
+        self.run_main()
+        os.remove(self.photo("2023", "cake.jpg"))
+        _, out = self.run_main()
+        self.assertIn("./photo-prune.py ssd --from-missing", out)
 
 
 if __name__ == "__main__":
