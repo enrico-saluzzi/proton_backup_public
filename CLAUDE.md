@@ -19,12 +19,19 @@ about a real archive.
 
 ## Commands
 
-No build, no test runner, standard library only. Minimum check after a change:
+No build, standard library only. Minimum check after a change:
 
 ```bash
 python3 -m py_compile some-script.py
 ./some-script.py --help
+python3 -m unittest discover -s tests -v
 ```
+
+Unit tests live in `tests/` (unittest, no pytest), one file per script; so
+far `tests/test_drive_compare.py`. Each test loads the script fresh with
+`HOME` set to a temporary folder and talks to a fake `proton-drive` written
+by the test. Add a test with every change to a covered script, and a test
+file when a script gains real logic.
 
 Running a script for real needs an authenticated Proton account and real
 data. To verify a change without touching Proton, run the scripts against
@@ -56,6 +63,12 @@ protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    flag); called by file-backup.py and drive-compare.py at
                    start. Incomplete scans keep .state/.queue and resume
                    (within 24 h); complete ones remove them.
+
+drive-compare.py -> reads ~/.config/proton-backup/config.ini (profiles, written
+                   by --setup; config.example.ini documents it) and
+                   ignore-<profile>.txt (appended by the review); writes one
+                   report drive-compare-<profile>-<timestamp>.txt and, when
+                   there's something to copy, copy-to-proton-*.sh
 
 photo-backup.py -> .proton-photo-inventory.json (timeline), .proton-photo-state.txt
                    (uids downloaded), .proton-photo-map.json (uid -> local file,
@@ -117,11 +130,16 @@ These are consequences of real failures, not style:
   can touch; keep it accurate.
 - **Uploads go through a generated script, never run by the tools**: the
   user reviews it first. Drive files are copied into the folder synced by
-  the Proton Drive app (`drive-compare.py --copy-script`), never
-  overwriting; photos go through `photo upload`
+  the Proton Drive app (`drive-compare.py`): a missing file never
+  overwrites anything, and only a file whose newer version the user chose
+  (`winner = folder`/`newer`, or `c` in the review) replaces Proton's, which
+  keeps the old one in its version history; photos go through `photo upload`
   (`protonlib.write_upload_script`), since Photos isn't a folder. Both
   scripts must skip files that are empty at run time (online-only
   placeholders read as 0 bytes and would be uploaded empty) and must run on
   macOS bash 3.2.
 - **When in doubt, report missing**: a false "present" loses data when the
-  old copy is deleted; a false "missing" costs a duplicate.
+  old copy is deleted; a false "missing" costs a duplicate. One deliberate
+  exception, asked for by the user: `drive-compare.py` matches an online-only
+  placeholder to a moved file on Proton by name (there's no content to hash),
+  and the report counts those matches separately so they stay visible.
