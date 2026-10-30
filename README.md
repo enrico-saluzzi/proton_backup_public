@@ -99,6 +99,13 @@ with the same name, so it's written once: with a single profile, no name is
 needed at all. Their own sections, `[photo-redate ssd]` for instance with the
 albums to leave alone, are optional.
 
+Like the Drive scan, what the photo scripts read from Proton is saved and
+reusable with the same option, `--reuse-scan`: the timeline and the album
+list (`photo-backup.py`, in the backup folder) and the timeline
+(`photo-compare.py`, in `~/drive-sync-logs`). The same hint appears when the
+saved copy is less than an hour old, and the files are only replaced once
+they're written completely.
+
 The Photos section isn't synced by the desktop client and isn't a filesystem
 path: it only exists through the CLI's `photo` and `album` commands, which is
 what these scripts use. In the backup, photos are matched to local files by
@@ -287,8 +294,9 @@ the profile, or `--tz`, to change it).
   may show up as missing for the same reason.
 - The upload script uses `photo upload -c rename` and skips files that are
   empty when it runs: make the folder **available offline** before running it.
-- The Proton timeline is saved in `~/drive-sync-logs`; pass it back with
-  `--inventory` to avoid reading it again while you iterate.
+- The Proton timeline is saved in `~/drive-sync-logs/proton-photo-timeline.json`;
+  `--reuse-scan` reuses it instead of reading it again while you iterate,
+  like the Drive scan.
 
 #### Pruning photos
 
@@ -337,7 +345,7 @@ plan you reviewed, and is resumable.
 | `photos-deleted-locally.txt`, `unrecognized-photos.txt`, `photos-not-downloaded.txt` | `photo-backup.py` | you |
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
-| `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
+| `~/drive-sync-logs/proton-photo-timeline.json` | `photo-compare.py` | `photo-compare.py --reuse-scan` |
 | `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | `file-backup.py`, `drive-compare.py` |
 | `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
 | `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |

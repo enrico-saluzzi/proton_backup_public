@@ -93,7 +93,8 @@ photo-backup.py -> .proton-photo-inventory.json (timeline), .proton-photo-state.
 photo-redate.py -> redate-plan.json -> photo-redate.py --apply (reupload-state.json)
 
 photo-compare.py -> reads the timeline itself (`photo timeline -d -j`, saved
-                   to ~/drive-sync-logs) or takes one with --inventory; it
+                   to ~/drive-sync-logs/proton-photo-timeline.json, reused with
+                   --reuse-scan) or takes one with --inventory; it
                    doesn't depend on a photo backup
 ```
 
@@ -141,6 +142,12 @@ These are consequences of real failures, not style:
   `--apply`, shows the list first, and refuses to leave an album empty.
 - **Resumable**: every long operation writes a state file and resumes from
   it. A new phase needs its own checkpoint.
+- **Write state and saved inventories with `protonlib.write_json`** (or a
+  `.partial` file then `os.replace`): an interrupted write must leave the
+  previous version, never a truncated file another script can't read.
+- **One reuse option, `--reuse-scan`**, for anything slow read from Proton
+  (Drive scan, Photos timeline, album list), with `protonlib.suggest_reuse`
+  before reading it again.
 - **Read-only unless stated**: the header's SAFETY section says what a script
   can touch; keep it accurate.
 - **Uploads go through a generated script, never run by the tools**: the

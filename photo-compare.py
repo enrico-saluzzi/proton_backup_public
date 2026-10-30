@@ -38,9 +38,10 @@ RESULT
     Make the folder available offline and run again.
 
   Lists are written to --out-dir (default ~/drive-sync-logs). The Proton
-  timeline is read with `photo timeline -d -j` and saved there too; pass it
-  back with --inventory to skip reading it again. A photo backup made with
-  photo-backup.py has one ready: .proton-photo-inventory.json.
+  timeline is read with `photo timeline -d -j` and saved there too, as
+  proton-photo-timeline.json: --reuse-scan reuses it instead of reading it
+  again, like the Drive scan. --inventory FILE reuses another one, e.g. the
+  .proton-photo-inventory.json of a photo-backup.py backup.
 
 UPLOAD SCRIPT
   With --upload-script it also writes photos-upload-<label>-<timestamp>.sh,
@@ -64,7 +65,7 @@ USAGE
   ./photo-compare.py camera
   ./photo-compare.py ~/Dropbox/"Camera Uploads"
   ./photo-compare.py ~/Dropbox/"Camera Uploads" ~/Pictures/Phone --upload-script
-  ./photo-compare.py ~/Dropbox/"Camera Uploads" --inventory ~/drive-sync-logs/proton-photo-timeline-<stamp>.json
+  ./photo-compare.py camera --reuse-scan
 
 SAFETY
   Read-only. Doesn't upload, modify or delete anything: the upload script is
@@ -130,9 +131,11 @@ def parse_args():
                    help="also write a script that uploads the missing photos to Proton")
     g.add_argument("--batch", type=int,
                    help="photos per upload command in the upload script (default 20)")
-    p.add_argument("--inventory", default=None,
-                   help="reuse a saved Proton timeline (JSON from `photo timeline -d -j`) "
-                        "instead of reading it again")
+    p.add_argument("--reuse-scan", action="store_true",
+                   help="reuse the Proton timeline saved last time "
+                        "(~/drive-sync-logs/proton-photo-timeline.json) instead of reading it")
+    p.add_argument("--inventory", default=None, metavar="FILE",
+                   help="reuse another saved Proton timeline (JSON from `photo timeline -d -j`)")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
     p.add_argument("--exiftool", default="exiftool")
     p.add_argument("--out-dir", default=os.path.expanduser("~/drive-sync-logs"))
@@ -237,13 +240,21 @@ def to_epoch(naive_or_aware, tzinfo):
 
 # --- Proton side -------------------------------------------------------------
 
-def load_timeline(a, stamp):
-    if a.inventory:
-        path = os.path.expanduser(a.inventory)
+TIMELINE = "proton-photo-timeline.json"
+
+
+def load_timeline(a):
+    saved = os.path.join(a.out_dir, TIMELINE)
+    path = os.path.expanduser(a.inventory) if a.inventory else (saved if a.reuse_scan else None)
+    if path:
+        if not os.path.exists(path):
+            sys.exit(f"ERROR: no saved Proton timeline in {path}. Run without "
+                     f"{'--inventory' if a.inventory else '--reuse-scan'}.")
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         print(f"  Proton timeline reused: {path}")
         return data
+    protonlib.suggest_reuse(saved, "The Proton timeline saved last time", "--reuse-scan")
     print("  Reading the Proton Photos timeline...")
     t0 = time.time()
     try:
@@ -259,11 +270,9 @@ def load_timeline(a, stamp):
     except json.JSONDecodeError as e:
         sys.exit(f"ERROR: 'photo timeline' output is not valid JSON: {e}")
     os.makedirs(a.out_dir, exist_ok=True)
-    saved = os.path.join(a.out_dir, f"proton-photo-timeline-{stamp}.json")
-    with open(saved, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+    protonlib.write_json(saved, data)
     print(f"  {len(data)} photos read in {int(time.time() - t0)}s, saved to {saved}")
-    print("  (pass it with --inventory to skip reading it next time)")
+    print("  (--reuse-scan reuses it next time)")
     return data
 
 
@@ -490,7 +499,7 @@ def main():
     print(f"  Times without a zone read in: {zone}")
     print("")
 
-    timeline = load_timeline(a, stamp)
+    timeline = load_timeline(a)
     by_sha, by_sec, info = index_proton(timeline)
     if not by_sha:
         print("  WARNING: the timeline has no sha1 (read without -d?): "

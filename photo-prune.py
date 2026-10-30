@@ -33,7 +33,7 @@ SAFETY
   - Proton's trash has no expiry, so every deletion stays recoverable
   - resumable: progress is saved in prune-state.json in the backup folder
 
-  After pruning, bring the backup in line (without --reuse-inventory):
+  After pruning, bring the backup in line (without --reuse-scan):
       ./photo-backup.py
 
 PROFILES
@@ -224,8 +224,7 @@ def main():
             st = json.load(f)
 
     def save_state():
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(st, f, ensure_ascii=False)
+        protonlib.write_json(state_path, st, ensure_ascii=False)
 
     trashed = local_removed = errors = 0
     t0 = time.time()

@@ -78,6 +78,16 @@ def as_local(rel):
     return rel
 
 
+def write_json(path, data, **dump_args):
+    """Write JSON through a temporary file: an interrupted write (Ctrl-C, a
+    full disk) leaves the previous version intact instead of a truncated
+    file that the next run, or another script, can't read."""
+    tmp = path + ".partial"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, **dump_args)
+    os.replace(tmp, path)
+
+
 def run_cli(cli, cmd, timeout, capture=True):
     """Invoke the Proton Drive CLI with stdin closed.
 
@@ -215,25 +225,35 @@ def scan_complete(tsv):
 def _suggest_reuse(out, root):
     """Say so when the last complete scan is recent: Proton may not have
     changed since, and a scan costs half an hour or more."""
-    if not scan_complete(out):
+    if scan_complete(out):
+        suggest_reuse(out, f"The last complete scan of {root}", "--reuse-scan")
+
+
+def suggest_reuse(path, what, option):
+    """Before reading something slow from Proton again: if `path` (what was
+    saved last time) is recent, say how old it is and how to reuse it, and in
+    a terminal wait a few seconds so Ctrl-C can stop the run. Never reuses on
+    its own: Proton may have changed in the meantime."""
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
         return
-    age = time.time() - os.path.getmtime(out)
     if age > REUSE_HINT_MINUTES * 60:
         return
     minutes = max(1, int(age // 60))
-    print(f"  The last complete scan of {root} is {minutes} minute{'s' if minutes > 1 else ''} old.")
+    print(f"  {what} is {minutes} minute{'s' if minutes > 1 else ''} old.")
     print("  If nothing changed on Proton since, stop now (Ctrl-C) and run again with")
-    print("  --reuse-scan. Otherwise wait: it scans again.")
+    print(f"  {option}. Otherwise wait: it's read again.")
     if not (sys.stdin.isatty() and REUSE_HINT_WAIT):
         return
     try:
         for left in range(REUSE_HINT_WAIT, 0, -1):
-            sys.stderr.write(f"\r  Scanning again in {left}s... ")
+            sys.stderr.write(f"\r  Reading again in {left}s... ")
             sys.stderr.flush()
             time.sleep(1)
     except KeyboardInterrupt:
         sys.stderr.write("\n")
-        sys.exit("Stopped before scanning: run again with --reuse-scan to use the last scan.")
+        sys.exit(f"Stopped before reading from Proton: run again with {option}.")
     sys.stderr.write("\r" + " " * 40 + "\r")
 
 

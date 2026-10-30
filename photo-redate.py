@@ -281,8 +281,7 @@ def make_plan(a):
         print(f"  ... and {len(plan) - a.max_print} more")
 
     out = os.path.join(a.dest, PLAN)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(plan, f, ensure_ascii=False, indent=1)
+    protonlib.write_json(out, plan, ensure_ascii=False, indent=1)
     print("")
     print(f"  Plan saved: {out}")
     print("  NOTHING was changed. Review the plan, then run again with --apply.")
@@ -300,11 +299,7 @@ def load_state(a):
 
 
 def save_state(a, st):
-    p = os.path.join(a.dest, STATE)
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(st, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, p)
+    protonlib.write_json(os.path.join(a.dest, STATE), st, ensure_ascii=False, indent=1)
 
 
 def cli(a, cmd, timeout=None):

@@ -772,5 +772,49 @@ class ScanDriveTest(ScriptTestCase):
             self.assertGreaterEqual(sleep.call_count, 3)
 
 
+class WriteJsonTest(ScriptTestCase):
+
+    def test_writes_the_data(self):
+        path = os.path.join(self.tmp, "x.json")
+        self.plib.write_json(path, {"a": [1, 2]}, indent=1)
+        self.assertEqual(json.loads(read(path)), {"a": [1, 2]})
+        self.assertFalse(os.path.exists(path + ".partial"))
+
+    def test_interrupted_write_leaves_the_previous_version(self):
+        path = os.path.join(self.tmp, "x.json")
+        self.plib.write_json(path, {"old": True})
+        with mock.patch.object(self.plib.json, "dump", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.plib.write_json(path, {"new": True})
+        self.assertEqual(json.loads(read(path)), {"old": True})
+
+
+class SuggestReuseTest(ScriptTestCase):
+
+    def hint(self, path, tty=False):
+        out = io.StringIO()
+        with mock.patch.object(self.plib.sys, "stdin", FakeStdin(tty)), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.plib.suggest_reuse(path, "The saved thing", "--reuse-scan")
+        return out.getvalue()
+
+    def test_recent_file_gets_the_hint_with_its_age(self):
+        path = os.path.join(self.tmp, "saved.json")
+        open(path, "w").close()
+        t = time.time() - 125
+        os.utime(path, (t, t))
+        out = self.hint(path)
+        self.assertIn("The saved thing is 2 minutes old", out)
+        self.assertIn("--reuse-scan", out)
+
+    def test_old_or_missing_file_gets_nothing(self):
+        path = os.path.join(self.tmp, "saved.json")
+        self.assertEqual(self.hint(path), "")
+        open(path, "w").close()
+        t = time.time() - (self.plib.REUSE_HINT_MINUTES + 1) * 60
+        os.utime(path, (t, t))
+        self.assertEqual(self.hint(path), "")
+
+
 if __name__ == "__main__":
     unittest.main()

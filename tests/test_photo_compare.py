@@ -443,6 +443,47 @@ class EndToEndTest(PhotoCompareTestCase):
         with open(self.state + ".calls", encoding="utf-8") as f:
             return [json.loads(line) for line in f]
 
+    def camera_profile(self):
+        self.write_config(f"""
+            [photo-compare camera]
+            folder = {self.camera}
+            tz = UTC
+            exif = no
+            """)
+
+    def test_timeline_is_saved_in_one_file_and_reused_with_reuse_scan(self):
+        self.camera_profile()
+        self.run_main()
+        saved = os.path.join(self.out, "proton-photo-timeline.json")
+        self.assertTrue(os.path.exists(saved))
+        self.assertEqual(glob.glob(os.path.join(self.out, "proton-photo-timeline-*")), [])
+        rc, out = self.run_main("--reuse-scan")
+        self.assertEqual(rc, 1)
+        self.assertIn("timeline reused", out)
+        self.assertEqual(len(self.timeline_calls()), 1)     # read once, then reused
+
+    def test_reuse_scan_without_a_saved_timeline_is_an_error(self):
+        self.camera_profile()
+        self.assertExits(lambda: self.run_main("--reuse-scan"), "no saved Proton timeline")
+        self.assertFalse(os.path.exists(self.state + ".calls"))
+
+    def test_recent_timeline_suggests_reuse_scan(self):
+        self.camera_profile()
+        self.run_main()
+        rc, out = self.run_main()
+        self.assertIn("--reuse-scan", out)
+        self.assertIn("minute", out)
+        self.assertEqual(len(self.timeline_calls()), 2)     # only a hint: read again
+
+    def test_inventory_file_still_works(self):
+        self.camera_profile()
+        self.run_main()
+        other = os.path.join(self.tmp, "other-timeline.json")
+        os.replace(os.path.join(self.out, "proton-photo-timeline.json"), other)
+        rc, out = self.run_main("--inventory", other)
+        self.assertIn("timeline reused", out)
+        self.assertEqual(len(self.timeline_calls()), 1)
+
     def test_folder_path_run_puts_the_folders_in_verify(self):
         rc, _ = self.run_main(self.camera, "--tz", "UTC", "--no-exif", "--upload-script")
         self.assertEqual(rc, 1)
