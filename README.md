@@ -152,10 +152,13 @@ Then, every month:
   off):
   - a file **moved or renamed** on Proton: its old copy is deleted, once the
     same content (sha1) is in the backup at the new path;
-  - a file **deleted** on Proton: it's moved to `.deleted-on-proton/<date>/`
-    inside the backup, with its path, in case the deletion was a mistake.
-    The script never empties that folder and reminds you of its size at
-    every run: delete what you no longer need.
+  - a file **deleted** on Proton: it's moved, with its path, to
+    `deleted-on-proton/<date>/` next to the backup folder (e.g.
+    `/Volumes/Disk/deleted-on-proton` for `/Volumes/Disk/proton-files`), in
+    case the deletion was a mistake. Another folder: `deleted_dir` in the
+    profile, needed when the backup folder is the root of a disk. The script
+    never empties it and reminds you of its size at every run: delete what
+    you no longer need.
 
   Folders left empty are removed. The cleanup runs only after every download
   succeeded, and stops if more than 10% of the backup would go (usually a

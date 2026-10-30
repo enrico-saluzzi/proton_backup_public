@@ -145,8 +145,8 @@ These are consequences of real failures, not style:
   One exception, local only: `file-backup.py` with `cleanup = yes` (the
   default) keeps the backup in step with Proton without asking. It deletes
   a file only when the same content (sha1) is in the backup at its new
-  path, moves the rest to `.deleted-on-proton/<date>/`, which it never
-  empties, runs only after every download succeeded, and stops when more
+  path, moves the rest to `deleted_dir/<date>/` (default
+  `deleted-on-proton` next to the backup folder), which it never empties, runs only after every download succeeded, and stops when more
   than 10% of the backup would go.
 - **Resumable**: every long operation writes a state file and resumes from
   it. A new phase needs its own checkpoint.
