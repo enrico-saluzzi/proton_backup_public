@@ -12,10 +12,12 @@ works with no setup from any working directory, as long as this file sits
 next to the script that imports it.
 """
 
+import configparser
 import hashlib
 import json
 import os
 import queue
+import re
 import shlex
 import subprocess
 import sys
@@ -435,3 +437,285 @@ def read_scan(path):
                 size, mtime = 0, 0
             rows.append((parts[0], size, mtime, parts[3], parts[4]))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Configuration file and profiles
+#
+# Scripts that take profiles read them from one INI file,
+# ~/.config/proton-backup/config.ini (or --config). A profile is a section
+# named "<script> <profile>", e.g. [drive-compare dropbox] or
+# [file-backup ssd]; [DEFAULT] holds values shared by every profile. Each
+# setting, its default and its explanation are declared here, in
+# PROFILE_SETTINGS, so that any script can rewrite the whole file with the
+# right comments. Command-line options always override the profile.
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR = os.path.expanduser("~/.config/proton-backup")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.ini")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# script -> [(setting, default, explanation)], in the order they're written
+PROFILE_SETTINGS = {
+    "drive-compare": [
+        ("folder", "",
+         "the folder to compare with Proton (e.g. ~/Dropbox, or a copy on a disk)"),
+        ("proton_root", "/my-files",
+         "the Proton folder it should match (/my-files is the whole Drive)"),
+        ("exclude", "",
+         "top-level subfolders to skip, comma-separated, exact names"),
+        ("compare_by", "content",
+         "content = identical files verified by sha1 (slower, certain) | "
+         "size = trust name and size"),
+        ("winner", "proton",
+         "same file, different content: proton = keep Proton's, nothing to do | "
+         "folder = copy the folder's over Proton's | newer = the most recently "
+         "modified wins | ask = list it among the files to decide"),
+        ("moved", "hide",
+         "files found on Proton under another path or name: hide = count only | "
+         "list = show them in the report"),
+        ("proton_only", "hide",
+         "files only on Proton: hide = count only | list = show them in the report"),
+        ("copy_script", "no",
+         "yes = also put the files missing on Proton in the copy script"),
+        ("review_max", "20",
+         "ask file by file at the end when at most this many need a decision "
+         "(0 = never)"),
+        ("ignore_file", "",
+         "paths deleted from Proton on purpose, one per line, never reported again "
+         "(empty = ~/.config/proton-backup/ignore-<profile>.txt)"),
+        ("proton_folder", "",
+         "the local folder synced by the Proton Drive app matching proton_root "
+         "(empty = found automatically)"),
+    ],
+    "file-backup": [
+        ("dest", "",
+         "the backup folder, e.g. on an external disk"),
+        ("proton_root", "/my-files",
+         "the Proton folder to back up (/my-files is the whole Drive)"),
+        ("verify", "yes",
+         "yes = recompute the sha1 of every local file: the only check that "
+         "catches a corrupted file of the same size (slower)"),
+        ("workers", "3",
+         "parallel calls to the CLI while scanning Proton"),
+        ("batch", "20",
+         "files per download call"),
+        ("timeout", "1800",
+         "seconds before a download call is given up (it's retried on the next run)"),
+    ],
+}
+# explanations for settings in [DEFAULT], shared by several scripts
+SHARED_HELP = {
+    "proton_root": "the Proton folder to work on (/my-files is the whole Drive)",
+}
+SETTING_CHOICES = {
+    "compare_by": ("content", "size"),
+    "winner": ("proton", "folder", "newer", "ask"),
+    "moved": ("hide", "list"),
+    "proton_only": ("hide", "list"),
+    "copy_script": ("yes", "no"),
+    "verify": ("yes", "no"),
+}
+SETTING_MINIMUM = {"review_max": 0, "workers": 1, "batch": 1, "timeout": 1}
+
+
+def setting_help(key):
+    for settings in PROFILE_SETTINGS.values():
+        for k, _, h in settings:
+            if k == key:
+                return h
+    return None
+
+
+def profile_defaults(script):
+    return {k: d for k, d, _ in PROFILE_SETTINGS[script]}
+
+
+def read_config(path):
+    cfg = configparser.ConfigParser(interpolation=None,
+                                    inline_comment_prefixes=(";", "#"))
+    if os.path.exists(path):
+        try:
+            cfg.read(path, encoding="utf-8")
+        except configparser.Error as e:
+            sys.exit(f"ERROR: can't read {path}:\n  {e}")
+    return cfg
+
+
+def profile_section(script, name):
+    return f"{script} {name}"
+
+
+def profile_names(cfg, script):
+    prefix = script + " "
+    return [s[len(prefix):] for s in cfg.sections() if s.startswith(prefix)]
+
+
+def render_config(cfg):
+    """The configuration as text, every setting preceded by its explanation."""
+    out = ["# Profiles for the proton_backup scripts: one section per profile,",
+           "# named [<script> <profile>], e.g. [drive-compare dropbox] or [file-backup ssd].",
+           "# Run:   ./<script>.py <profile>   (or just ./<script>.py with a single profile)",
+           "# Edit:  ./<script>.py --setup <profile>, or by hand.",
+           "# Settings in [DEFAULT] apply to every profile.", ""]
+
+    def block(items, script):
+        own_help = ({k: h for k, _, h in PROFILE_SETTINGS[script]}
+                    if script in PROFILE_SETTINGS else dict(SHARED_HELP))
+        known = list(own_help)
+        for k in known + sorted(set(items) - set(known)):
+            if k not in items:
+                continue
+            h = own_help.get(k) or setting_help(k)
+            if h:
+                out.append(f"; {h}")
+            out.append(f"{k} = {items[k]}")
+        out.append("")
+
+    if cfg.defaults():
+        out.append("[DEFAULT]")
+        block(dict(cfg.defaults()), None)
+    for section in cfg.sections():
+        out.append(f"[{section}]")
+        # only the profile's own keys, not those inherited from [DEFAULT]
+        own = {k: v for k, v in cfg.items(section, raw=True)
+               if k not in cfg.defaults() or cfg.defaults()[k] != v}
+        block(own, section.split(" ", 1)[0])
+    return "\n".join(out)
+
+
+def write_config(path, cfg):
+    # a symlinked config (e.g. kept in a private repo) stays a symlink
+    path = os.path.realpath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(render_config(cfg))
+    os.replace(tmp, path)
+
+
+def check_settings(s, where):
+    """Validate choices and numbers in place (numbers become ints)."""
+    for k, allowed in SETTING_CHOICES.items():
+        if k in s and s[k] not in allowed:
+            sys.exit(f"ERROR: {where}: {k} = {s[k]!r}, expected one of: {', '.join(allowed)}")
+    for k, low in SETTING_MINIMUM.items():
+        if k not in s:
+            continue
+        try:
+            s[k] = int(s[k])
+            if s[k] < low:
+                raise ValueError
+        except ValueError:
+            sys.exit(f"ERROR: {where}: {k} must be a number, {low} or more")
+
+
+def choose_profile(cfg, script, target, config_path):
+    """The profile to use, or None when target is a path to take as is.
+
+    With no target, the only profile of this script is used. A target that
+    looks like a path ("/", "~", ".") is never a profile."""
+    names = profile_names(cfg, script)
+    if target is None:
+        if len(names) == 1:
+            return names[0]
+        if not names:
+            sys.exit(f"ERROR: no {script} profile in {config_path}.\n"
+                     f"  Create one with: ./{script}.py --setup NAME (or pass a folder)")
+        sys.exit(f"ERROR: several {script} profiles in {config_path}: "
+                 f"{', '.join(names)}. Name the one to use.")
+    path_like = "/" in target or target.startswith(("~", "."))
+    if not path_like and target in names:
+        return target
+    if path_like or os.path.isdir(os.path.expanduser(target)):
+        return None
+    if cfg.has_section(target):
+        sys.exit(f"ERROR: [{target}] in {config_path} is in the old format: rename the "
+                 f"section [{profile_section(script, target)}].")
+    sys.exit(f"ERROR: '{target}' is neither a {script} profile in {config_path} "
+             f"(profiles: {', '.join(names) or 'none yet'}) nor a folder.\n"
+             f"  Create the profile with: ./{script}.py --setup {target}")
+
+
+def load_settings(cfg, script, name):
+    """Defaults, then [DEFAULT], then the profile (if any)."""
+    s = profile_defaults(script)
+    if name is None:
+        s.update(cfg.defaults())
+    else:
+        s.update(cfg.items(profile_section(script, name)))
+    return s
+
+
+def ask(question, default, choices=None, minimum=None):
+    """One setup question. End of input means "quit", as Ctrl-C does."""
+    hint = f" [{'/'.join(choices)}]" if choices else ""
+    while True:
+        try:
+            ans = input(f"  {question}{hint} ({default}): ").strip()
+        except EOFError:
+            raise KeyboardInterrupt
+        ans = ans or str(default)
+        if choices and ans not in choices:
+            print(f"    answer one of: {', '.join(choices)}")
+            continue
+        if minimum is not None and not (ans.isdigit() and int(ans) >= minimum):
+            print(f"    a number, {minimum} or more")
+            continue
+        return ans
+
+
+def ask_existing_folder(key, default):
+    """Ask for a folder; a missing one can be kept (an unplugged disk)."""
+    while True:
+        folder = ask(key, default)
+        if os.path.isdir(os.path.expanduser(folder)):
+            return folder
+        print(f"    {folder} doesn't exist (an external disk not plugged in?)")
+        if ask("keep it anyway?", "no", ("yes", "no")) == "yes":
+            return folder
+
+
+def run_setup(config_path, script, name, questions):
+    """Create or change a profile of `script`. questions(current) asks the
+    script's own questions and returns {setting: value}."""
+    if not sys.stdin.isatty():
+        sys.exit("ERROR: --setup asks questions: run it in a terminal.")
+    cfg = read_config(config_path)
+    print("")
+    print(f"{script} setup  (configuration: {config_path})")
+    names = profile_names(cfg, script)
+    if names:
+        print(f"  existing {script} profiles: {', '.join(names)}")
+    print("  Press Enter to keep the value in brackets. Ctrl-C to quit without saving.")
+    print("")
+    section = None
+    try:
+        while not name or not PROFILE_RE.match(name):
+            if name:
+                print("    letters, digits, '.', '_' or '-' only, e.g. dropbox or ssd")
+            name = input("  Profile name, e.g. dropbox or ssd: ").strip()
+        section = profile_section(script, name)
+        cur = profile_defaults(script)
+        cur.update(cfg.defaults())
+        if cfg.has_section(section):
+            cur.update(cfg.items(section, raw=True))
+            print(f"  Changing profile [{section}].")
+        else:
+            print(f"  New profile [{section}].")
+        new = questions(cur)
+    except (KeyboardInterrupt, EOFError):
+        print("")
+        sys.exit("Setup interrupted: nothing written.")
+
+    if not cfg.has_section(section):
+        cfg.add_section(section)
+    for k, v in new.items():
+        cfg.set(section, k, str(v))
+    write_config(config_path, cfg)
+    print("")
+    print(f"  Saved profile [{section}] in {config_path}")
+    others = profile_names(cfg, script)
+    print(f"  Run it with:  ./{script}.py" + (f" {name}" if len(others) > 1 else
+                                              f"   (or ./{script}.py {name})"))
+    return 0

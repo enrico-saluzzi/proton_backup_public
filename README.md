@@ -56,7 +56,7 @@ single command and does everything it needs by itself.
 
 | I want to... | Script |
 |---|---|
-| back up my Drive files to a local disk | `file-backup.py` |
+| back up my Drive files to a local disk | `file-backup.py` (set up once with `--setup`) |
 | check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and
@@ -66,6 +66,15 @@ remote folder (default `/my-files`, the whole Drive). The scan is saved in
 `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
 command stops, and running it again resumes the scan; `--reuse-scan` skips it
 and uses the last complete one.
+
+Both read their choices from **profiles** in one configuration file,
+`~/.config/proton-backup/config.ini` (another one with `--config`): a section
+per profile, `[file-backup ssd]`, `[drive-compare dropbox]`, with `[DEFAULT]`
+for what they share. `--setup NAME` creates or changes a profile by asking
+one question at a time; [`config.example.ini`](config.example.ini) documents
+every setting. With a single profile, the script name alone is enough.
+Options on the command line override the profile, and a folder path still
+works instead of a profile name.
 
 ### Photos (Proton Photos)
 
@@ -96,17 +105,30 @@ B=/Volumes/MyBackupDisk
 
 #### Monthly backup
 
+Once, describe the backup disk as a profile:
+
 ```bash
-./file-backup.py $B/proton-files --verify
+./file-backup.py --setup ssd
 ```
 
-- `--verify` recomputes the sha1 of every local file. Do it **every time**: it
-  is the only check that catches a corrupted file of the exact same size.
-  Expect roughly 20 minutes per 150 GB.
+Then, every month:
+
+```bash
+./file-backup.py
+```
+
+- The backup verifies by content by default (`verify = yes`): it recomputes
+  the sha1 of every local file, the only check that catches a corrupted file
+  of the exact same size. Expect roughly 20 minutes per 150 GB. `--no-verify`
+  skips it for one run.
+- If the disk isn't plugged in, the script stops instead of creating the
+  backup folder on the internal disk. (A folder path given on the command
+  line, `./file-backup.py $B/proton-files`, is created if missing.)
+- `--dry-run` shows what would be downloaded.
 
 Note: Proton reports these hashes as `sha1Verified: false`, i.e. declared by
-the uploading client, not recomputed by the servers. `--verify` confirms the
-backup matches what Proton *declares* to hold.
+the uploading client, not recomputed by the servers. Verification confirms
+the backup matches what Proton *declares* to hold.
 
 #### Migrating from another cloud (e.g. Dropbox)
 
@@ -114,9 +136,8 @@ Before deleting the old copy, check that nothing in it is missing on Drive
 (for the camera folder, see *Photos* below). The same check works later on any
 copy of your files, e.g. on a disk.
 
-Describe the folder once, as a **profile**: the script asks one question at a
-time and saves the answers in `~/.config/proton-backup/config.ini`
-([`config.example.ini`](config.example.ini) documents every setting):
+Describe the folder once, as a profile (`[drive-compare dropbox]` in the
+configuration file):
 
 ```bash
 ./drive-compare.py --setup dropbox
@@ -125,7 +146,7 @@ time and saves the answers in `~/.config/proton-backup/config.ini`
 Then compare whenever you want:
 
 ```bash
-./drive-compare.py dropbox
+./drive-compare.py dropbox      # or just ./drive-compare.py with a single profile
 ```
 
 The profile name is how the folder is called in the report ("Only in
@@ -284,7 +305,7 @@ to change it).
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline-<timestamp>.json` | `photo-compare.py` | `photo-compare.py --inventory` |
-| `~/.config/proton-backup/config.ini` (the profiles) | `drive-compare.py --setup`, or you | `drive-compare.py` |
+| `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | `file-backup.py`, `drive-compare.py` |
 | `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
 | `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |
 | `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py`, when there's something to copy | you, after reviewing it |

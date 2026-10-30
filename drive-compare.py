@@ -19,13 +19,15 @@ WHY
 
 PROFILES
   The choices (which folder, which side wins, what to show) live in a
-  configuration file, ~/.config/proton-backup/config.ini, one profile per
-  section. Create or change one with:
+  configuration file, ~/.config/proton-backup/config.ini (another one with
+  --config), shared with file-backup.py. A profile is a section named
+  [drive-compare <name>]. Create or change one with:
 
       ./drive-compare.py --setup dropbox
 
-  then compare with ./drive-compare.py dropbox. The profile name is used in
-  the report and in file names ("Only in dropbox"). A folder path works too
+  then compare with ./drive-compare.py dropbox, or just ./drive-compare.py
+  when it's the only drive-compare profile. The profile name is used in the
+  report and in file names ("Only in dropbox"). A folder path works too
   (./drive-compare.py ~/Dropbox): the defaults apply and the folder is
   called "folder". Command-line options override the profile.
   config.example.ini documents every setting.
@@ -83,6 +85,7 @@ COPY SCRIPT
 USAGE
   ./drive-compare.py --setup dropbox
   ./drive-compare.py dropbox
+  ./drive-compare.py dropbox --config ./my-config.ini
   ./drive-compare.py dropbox --details
   ./drive-compare.py ~/Dropbox --exclude "Camera Uploads" --winner ask
   ./drive-compare.py /Volumes/Disk/Work --root /my-files/Work --copy-script
@@ -95,7 +98,6 @@ SAFETY
 """
 
 import argparse
-import configparser
 import fnmatch
 import json
 import os
@@ -118,144 +120,29 @@ JUNK_DIRS = {".Trashes", ".Trash", ".TemporaryItems", ".Spotlight-V100",
              ".dropbox.cache"}
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Profiles (the configuration file itself is handled by protonlib)
 # ---------------------------------------------------------------------------
 
-CONFIG_DIR = os.path.expanduser("~/.config/proton-backup")
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.ini")
+SCRIPT = "drive-compare"
 NO_PROFILE = "folder"        # name used when a path is given instead of a profile
-
-# order, default and explanation of every profile setting
-SETTINGS = [
-    ("folder", "",
-     "the folder to compare with Proton (e.g. ~/Dropbox, or a copy on a disk)"),
-    ("proton_root", "/my-files",
-     "the Proton folder it should match (/my-files is the whole Drive)"),
-    ("exclude", "",
-     "top-level subfolders to skip, comma-separated, exact names"),
-    ("compare_by", "content",
-     "content = identical files verified by sha1 (slower, certain) | "
-     "size = trust name and size"),
-    ("winner", "proton",
-     "same file, different content: proton = keep Proton's, nothing to do | "
-     "folder = copy the folder's over Proton's | newer = the most recently "
-     "modified wins | ask = list it among the files to decide"),
-    ("moved", "hide",
-     "files found on Proton under another path or name: hide = count only | "
-     "list = show them in the report"),
-    ("proton_only", "hide",
-     "files only on Proton: hide = count only | list = show them in the report"),
-    ("copy_script", "no",
-     "yes = also put the files missing on Proton in the copy script"),
-    ("review_max", "20",
-     "ask file by file at the end when at most this many need a decision "
-     "(0 = never)"),
-    ("ignore_file", "",
-     "paths deleted from Proton on purpose, one per line, never reported again "
-     "(empty = ~/.config/proton-backup/ignore-<profile>.txt)"),
-    ("proton_folder", "",
-     "the local folder synced by the Proton Drive app matching proton_root "
-     "(empty = found automatically)"),
-]
-DEFAULTS = {k: d for k, d, _ in SETTINGS}
-HELP = {k: h for k, _, h in SETTINGS}
-CHOICES = {
-    "compare_by": ("content", "size"),
-    "winner": ("proton", "folder", "newer", "ask"),
-    "moved": ("hide", "list"),
-    "proton_only": ("hide", "list"),
-    "copy_script": ("yes", "no"),
-}
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def read_config(path):
-    cfg = configparser.ConfigParser(interpolation=None,
-                                    inline_comment_prefixes=(";", "#"))
-    if os.path.exists(path):
-        try:
-            cfg.read(path, encoding="utf-8")
-        except configparser.Error as e:
-            sys.exit(f"ERROR: can't read {path}:\n  {e}")
-    return cfg
-
-
-def render_config(cfg):
-    """The configuration as text, every setting preceded by its explanation."""
-    out = ["# drive-compare.py profiles: one section per folder to compare.",
-           "# Run:   ./drive-compare.py <profile>",
-           "# Edit:  ./drive-compare.py --setup <profile>, or by hand.",
-           "# Settings in [DEFAULT] apply to every profile.", ""]
-
-    def block(items):
-        known = [k for k, _, _ in SETTINGS]
-        for k in known + sorted(set(items) - set(known)):
-            if k not in items:
-                continue
-            if k in HELP:
-                out.append(f"; {HELP[k]}")
-            out.append(f"{k} = {items[k]}")
-        out.append("")
-
-    if cfg.defaults():
-        out.append("[DEFAULT]")
-        block(dict(cfg.defaults()))
-    for name in cfg.sections():
-        out.append(f"[{name}]")
-        # only the profile's own keys, not those inherited from [DEFAULT]
-        own = {k: v for k, v in cfg.items(name, raw=True)
-               if k not in cfg.defaults() or cfg.defaults()[k] != v}
-        block(own)
-    return "\n".join(out)
-
-
-def write_config(path, cfg):
-    # a symlinked config (e.g. kept in a private repo) stays a symlink
-    path = os.path.realpath(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(render_config(cfg))
-    os.replace(tmp, path)
-
-
-def check_settings(s, where):
-    for k, allowed in CHOICES.items():
-        if s[k] not in allowed:
-            sys.exit(f"ERROR: {where}: {k} = {s[k]!r}, expected one of: {', '.join(allowed)}")
-    try:
-        s["review_max"] = int(s["review_max"])
-        if s["review_max"] < 0:
-            raise ValueError
-    except ValueError:
-        sys.exit(f"ERROR: {where}: review_max must be a number, 0 or more")
+CHOICES = protonlib.SETTING_CHOICES
+HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
 
 
 def resolve_settings(a):
     """Settings for this run: profile (or defaults), then command-line options."""
-    cfg = read_config(a.config)
-    target = a.target
-    path_like = "/" in target or target.startswith(("~", "."))
-    if not path_like and cfg.has_section(target):
-        name = target
-        s = dict(DEFAULTS)
-        s.update({k: v for k, v in cfg.items(name)})
-        where = f"profile [{name}] in {a.config}"
-        if not s["folder"]:
-            sys.exit(f"ERROR: {where} has no folder. Run: ./drive-compare.py --setup {name}")
-    elif os.path.isdir(os.path.expanduser(target)):
-        name = NO_PROFILE
-        s = dict(DEFAULTS)
-        s.update(cfg.defaults())
-        s["folder"] = target
+    cfg = protonlib.read_config(a.config)
+    name = protonlib.choose_profile(cfg, SCRIPT, a.target, a.config)
+    s = protonlib.load_settings(cfg, SCRIPT, name)
+    if name is None:
+        if not os.path.isdir(os.path.expanduser(a.target)):
+            sys.exit(f"ERROR: {a.target} doesn't exist")
+        s["folder"] = a.target
         where = "defaults and command line"
-    elif not path_like:
-        profiles = ", ".join(cfg.sections()) or "none yet"
-        sys.exit(f"ERROR: '{target}' is neither a profile in {a.config} "
-                 f"(profiles: {profiles}) nor a folder.\n"
-                 f"  Create the profile with: ./drive-compare.py --setup {target}")
     else:
-        sys.exit(f"ERROR: {target} doesn't exist")
+        where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
+        if not s["folder"]:
+            sys.exit(f"ERROR: {where} has no folder. Run: ./{SCRIPT}.py --setup {name}")
 
     overrides = {"proton_root": a.root, "exclude": a.exclude,
                  "compare_by": a.compare_by, "winner": a.winner,
@@ -269,15 +156,16 @@ def resolve_settings(a):
     for k, v in overrides.items():
         if v is not None:
             s[k] = str(v)
-    check_settings(s, where)
+    protonlib.check_settings(s, where)
 
+    name = name or NO_PROFILE
     s["name"] = name
     s["file_name"] = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or NO_PROFILE
     s["folder"] = os.path.expanduser(s["folder"]).rstrip(os.sep) or os.sep
     s["exclude"] = {protonlib.nfc(x.strip()) for x in s["exclude"].split(",") if x.strip()}
     s["copy_script"] = s["copy_script"] == "yes"
     s["ignore_file"] = os.path.expanduser(
-        s["ignore_file"] or os.path.join(CONFIG_DIR, f"ignore-{s['file_name']}.txt"))
+        s["ignore_file"] or os.path.join(protonlib.CONFIG_DIR, f"ignore-{s['file_name']}.txt"))
     s["proton_folder"] = os.path.expanduser(s["proton_folder"]) if s["proton_folder"] else ""
     s["where"] = where
     if not os.path.isdir(s["folder"]):
@@ -285,91 +173,30 @@ def resolve_settings(a):
     return s
 
 
-def ask(question, default, choices=None):
-    hint = f" [{'/'.join(choices)}]" if choices else ""
-    while True:
-        try:
-            ans = input(f"  {question}{hint} ({default}): ").strip()
-        except EOFError:
-            print("")
-            sys.exit("Setup interrupted: nothing written.")
-        ans = ans or default
-        if choices and ans not in choices:
-            print(f"    answer one of: {', '.join(choices)}")
+def setup_questions(cur):
+    ask = protonlib.ask
+    new = {}
+    print("")
+    print(f"  {HELP['folder']}")
+    new["folder"] = folder = protonlib.ask_existing_folder("folder", cur["folder"] or "~/Dropbox")
+    for k in ("proton_root", "exclude", "compare_by", "winner", "moved",
+              "proton_only", "copy_script", "review_max"):
+        print("")
+        print(f"  {HELP[k]}")
+        if k == "exclude":
+            full = os.path.expanduser(folder)
+            if os.path.isdir(full):
+                tops = sorted(d for d in os.listdir(full)
+                              if os.path.isdir(os.path.join(full, d))
+                              and not d.startswith("."))
+                if tops:
+                    print(f"    folders in it: {', '.join(tops)}")
+            new[k] = ask(k, cur[k] or "none")
+            if new[k] == "none":
+                new[k] = ""
             continue
-        return ans
-
-
-def setup(a):
-    """Create or change a profile by asking one question at a time."""
-    if not sys.stdin.isatty():
-        sys.exit("ERROR: --setup asks questions: run it in a terminal.")
-    cfg = read_config(a.config)
-    print("")
-    print(f"drive-compare setup  (configuration: {a.config})")
-    if cfg.sections():
-        print(f"  existing profiles: {', '.join(cfg.sections())}")
-    print("  Press Enter to keep the value in brackets. Ctrl-C to quit without saving.")
-    print("")
-    try:
-        name = a.target
-        while not name or not NAME_RE.match(name):
-            if name:
-                print("    letters, digits, '.', '_' or '-' only, e.g. dropbox or ssd")
-            name = input("  Profile name, e.g. dropbox or ssd: ").strip()
-        cur = dict(DEFAULTS)
-        cur.update(cfg.defaults())
-        if cfg.has_section(name):
-            cur.update(cfg.items(name, raw=True))
-            print(f"  Changing profile [{name}].")
-        else:
-            print(f"  New profile [{name}].")
-        print("")
-
-        new = {}
-        print(f"  {HELP['folder']}")
-        while True:
-            folder = ask("folder", cur["folder"] or "~/Dropbox")
-            if os.path.isdir(os.path.expanduser(folder)):
-                break
-            print(f"    {folder} doesn't exist (an external disk not plugged in?)")
-            if ask("keep it anyway?", "no", ("yes", "no")) == "yes":
-                break
-        new["folder"] = folder
-        for k in ("proton_root", "exclude", "compare_by", "winner", "moved",
-                  "proton_only", "copy_script", "review_max"):
-            print("")
-            print(f"  {HELP[k]}")
-            if k == "exclude":
-                full = os.path.expanduser(folder)
-                if os.path.isdir(full):
-                    tops = sorted(d for d in os.listdir(full)
-                                  if os.path.isdir(os.path.join(full, d))
-                                  and not d.startswith("."))
-                    if tops:
-                        print(f"    folders in it: {', '.join(tops)}")
-                new[k] = ask(k, cur[k] or "none")
-                if new[k] == "none":
-                    new[k] = ""
-                continue
-            while True:
-                new[k] = ask(k, cur[k], CHOICES.get(k))
-                if k != "review_max" or new[k].isdigit():
-                    break
-                print("    a number, 0 or more")
-    except (KeyboardInterrupt, EOFError):
-        print("")
-        sys.exit("Setup interrupted: nothing written.")
-
-    if not cfg.has_section(name):
-        cfg.add_section(name)
-    for k, v in new.items():
-        cfg.set(name, k, v)
-    write_config(a.config, cfg)
-    print("")
-    print(f"  Saved profile [{name}] in {a.config}")
-    print(f"  Compare with:  ./drive-compare.py {name}")
-    return 0
+        new[k] = ask(k, cur[k], CHOICES.get(k), protonlib.SETTING_MINIMUM.get(k))
+    return new
 
 
 # ---------------------------------------------------------------------------
@@ -1025,10 +852,11 @@ def parse_args():
         epilog="Settings: ~/.config/proton-backup/config.ini (see config.example.ini). "
                "Options given here override the profile.")
     p.add_argument("target", nargs="?",
-                   help="a profile from the configuration file, or a folder path")
+                   help="a profile from the configuration file (optional when there's "
+                        "only one), or a folder path")
     p.add_argument("--setup", action="store_true",
                    help="create or change the profile named by TARGET, asking questions")
-    p.add_argument("--config", default=CONFIG_PATH,
+    p.add_argument("--config", default=protonlib.CONFIG_PATH,
                    help="configuration file (default ~/.config/proton-backup/config.ini)")
     g = p.add_argument_group("settings (override the profile)")
     g.add_argument("--root", help="Proton folder to compare with (default /my-files)")
@@ -1062,15 +890,13 @@ def parse_args():
     a = p.parse_args()
     a.config = os.path.expanduser(a.config)
     a.out_dir = os.path.expanduser(a.out_dir)
-    if not a.setup and not a.target:
-        p.error("name a profile or a folder (or create a profile with --setup NAME)")
     return a
 
 
 def main():
     a = parse_args()
     if a.setup:
-        return setup(a)
+        return protonlib.run_setup(a.config, SCRIPT, a.target, setup_questions)
     s = resolve_settings(a)
 
     print("")
