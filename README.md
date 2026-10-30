@@ -379,6 +379,7 @@ plan you reviewed, and is resumable.
 
 | File | Written by | Used by |
 |---|---|---|
+| `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | all scripts |
 | `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
@@ -387,7 +388,6 @@ plan you reviewed, and is resumable.
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline.json` | `photo-compare.py` | `photo-compare.py --reuse-scan` |
-| `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | `file-backup.py`, `drive-compare.py` |
 | `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
 | `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |
 | `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py`, when there's something to copy | you, after reviewing it |
