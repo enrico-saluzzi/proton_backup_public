@@ -35,14 +35,17 @@ WHAT EACH RUN DOES
          to deleted_dir/<date>/<year>/, in case the deletion was a mistake.
          A file whose name matches a Proton photo that has no file in the
          backup is kept instead: it may be a converted copy (--import).
-       - extra copies of a photo already in the backup (same sha1): deleted
+       - extra copies of a photo already in the backup (same sha1): deleted,
+         after pointing the album links that used them to the copy that
+         stays (so the space is really freed)
        - with albums: links of photos no longer in their album, and folders
          of albums deleted on Proton, are removed. A link is only a second
          name of a photo file; if it was the last copy of its content, it's
          moved to deleted_dir/<date>/<album folder>/ instead.
-     deleted_dir is by default photos-deleted-on-proton next to the backup
-     folder (for /Volumes/Disk/proton-photos:
-     /Volumes/Disk/photos-deleted-on-proton); the script never empties it.
+     deleted_dir is by default deleted/photos next to the backup folder
+     (for /Volumes/Disk/proton-photos: /Volumes/Disk/deleted/photos, while
+     file-backup.py uses /Volumes/Disk/deleted/files); the script never
+     empties it.
      It stops if more than 10% of the backup would go (unless
      --force-cleanup).
   8. saves the uid -> file map (.proton-photo-map.json), used by
@@ -114,7 +117,7 @@ DELETED_LOCALLY = "photos-deleted-locally.txt"
 WORK_DIRS = {"_reupload"}       # photo-redate.py's work folder
 # where cleanup moves the photos deleted on Proton, next to the backup folder
 # unless deleted_dir says otherwise
-DELETED_DIR = "photos-deleted-on-proton"
+DELETED_DIR = os.path.join("deleted", "photos")
 
 
 SCRIPT = "photo-backup"
@@ -150,7 +153,7 @@ def parse_args():
                    help="only report what is no longer on Proton")
     g.add_argument("--deleted-dir",
                    help="where cleanup moves the photos deleted on Proton "
-                        "(default: photos-deleted-on-proton next to the backup folder)")
+                        "(default: deleted/photos next to the backup folder)")
     g.add_argument("--batch", type=int,
                    help="photos per CLI call (default 5: bigger batches time out more)")
     g.add_argument("--timeout", type=int,
@@ -400,7 +403,11 @@ def build_map(inventory, local_hashes):
         free = list(paths)
         pending = []
         for x in records:
-            hit = next((p for p in free if same_name(os.path.basename(p), name_of(x))), None)
+            # the exact name first: "IMG_1.jpg" over a "IMG_1 (1).jpg" left by
+            # a download that ran twice, so that's the copy kept
+            hit = next((p for p in free if os.path.basename(p).lower() == name_of(x).lower()),
+                       None) or next((p for p in free
+                                      if same_name(os.path.basename(p), name_of(x))), None)
             if hit:
                 photo_map[uid_of(x)] = hit
                 free.remove(hit)
@@ -734,6 +741,27 @@ def plan_cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
     return gone, extra, kept, links, len(local_hashes) + seen
 
 
+def album_files_by_inode(a):
+    """inode -> album files, to find the album links of a photo file."""
+    out = {}
+    if os.path.isdir(a.album_base):
+        for dp, dn, fn in os.walk(a.album_base):
+            dn[:] = [d for d in dn if not d.startswith(".")]
+            for f in fn:
+                p = os.path.join(dp, f)
+                if not f.startswith(".") and os.path.isfile(p):
+                    out.setdefault(inode(p), []).append(p)
+    return out
+
+
+def relink(link, target):
+    """Points the album file `link` to `target` (a hard link), replacing it
+    in one step."""
+    tmp = link + ".relink"
+    os.link(target, tmp)
+    os.replace(tmp, link)
+
+
 def print_list(a, title, paths, base):
     if not paths:
         return
@@ -774,6 +802,11 @@ def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
     kept_content = {expected_sha[u] for u in photo_map if u in expected_sha}
     kept_content |= {local_hashes[p] for p in kept}
     errors = []
+    stays = {}      # content -> the file the map keeps for it
+    for u, p in photo_map.items():
+        if u in expected_sha and os.path.exists(p):
+            stays.setdefault(expected_sha[u], p)
+    album_links = album_files_by_inode(a) if albums is not None and extra else {}
     for p in gone:
         try:
             protonlib.move_aside(p, os.path.join(hold, os.path.relpath(p, a.dest)))
@@ -783,6 +816,8 @@ def cleanup(a, inventory, local_hashes, photo_map, albums, expected_sha):
             errors.append((p, e))
     for p in extra:
         try:
+            for link in album_links.get(inode(p), []):
+                relink(link, stays[local_hashes[p]])
             os.remove(p)
             protonlib.remove_empty_dirs(a.dest, os.path.dirname(p))
         except OSError as e:

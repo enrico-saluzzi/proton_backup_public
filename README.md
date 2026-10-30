@@ -153,12 +153,12 @@ Then, every month:
   - a file **moved or renamed** on Proton: its old copy is deleted, once the
     same content (sha1) is in the backup at the new path;
   - a file **deleted** on Proton: it's moved, with its path, to
-    `files-deleted-on-proton/<date>/` next to the backup folder (e.g.
-    `/Volumes/Disk/files-deleted-on-proton` for `/Volumes/Disk/proton-files`),
-    in case the deletion was a mistake. Another folder: `deleted_dir` in the
-    profile, needed when the backup folder is the root of a disk. The script
-    never empties it and reminds you of its size at every run: delete what
-    you no longer need.
+    `deleted/files/<date>/` next to the backup folder (e.g.
+    `/Volumes/Disk/deleted/files` for `/Volumes/Disk/proton-files`; the photo
+    backup uses `deleted/photos`), in case the deletion was a mistake.
+    Another folder: `deleted_dir` in the profile, needed when the backup
+    folder is the root of a disk. The script never empties it and reminds
+    you of its size at every run: delete what you no longer need.
 
   Folders left empty are removed. The cleanup runs only after every download
   succeeded, and stops if more than 10% of the backup would go (usually a
@@ -279,16 +279,17 @@ chronological order, and `proton-albums/<album>/` organized like on Proton.
   or `--no-cleanup` turns it off), with the same rules as the file backup:
   - a photo **deleted** on Proton (a local file whose content is no longer
     on Proton, e.g. the old version of a photo re-dated with
-    `photo-redate.py`) is moved to `photos-deleted-on-proton/<date>/<year>/`
+    `photo-redate.py`) is moved to `deleted/photos/<date>/<year>/`
     next to the backup folder (`deleted_dir` for another place). A file
     named like a Proton photo that has no file in the backup is kept
     instead: it may be a copy converted by the browser (`--import`);
-  - an **extra copy** of a photo already in the backup (same sha1) is
-    deleted;
+  - an **extra copy** of a photo already in the backup (same sha1, e.g.
+    `IMG_1 (1).jpg` next to `IMG_1.jpg`) is deleted, and album links that
+    used it move to the copy that stays;
   - **album folders** lose the photos no longer in their album, and the
     folders of albums deleted on Proton go. These are only links to the
     photo files; one that was the last copy of a photo goes to
-    `photos-deleted-on-proton` instead.
+    `deleted/photos` instead.
 
   It runs only after every download succeeded and stops if more than 10%
   of the backup would go (`--force-cleanup`). `--dry-run` shows it, with the

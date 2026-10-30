@@ -603,8 +603,8 @@ class CleanupTest(EndToEndCase):
         return os.path.join(self.dest, *parts)
 
     def held(self, *parts):
-        # files-deleted-on-proton next to the backup folder
-        return os.path.join(os.path.dirname(self.dest), "files-deleted-on-proton",
+        # deleted/files next to the backup folder
+        return os.path.join(os.path.dirname(self.dest), "deleted", "files",
                             time.strftime("%Y-%m-%d"), *parts)
 
     def first_backup(self, files, **settings):
@@ -679,7 +679,7 @@ class CleanupTest(EndToEndCase):
             self.assertExits(lambda: self.run_main(), "is the root of a disk",
                              "Set deleted_dir")
             self.assertEqual(self.cli_calls("filesystem"), [])
-            self.profile(deleted_dir=os.path.join(dest, "files-deleted-on-proton"))
+            self.profile(deleted_dir=os.path.join(dest, "deleted", "files"))
             self.assertEqual(self.run_main()[0], 0)
             self.profile(cleanup="no")
             self.assertEqual(self.run_main()[0], 0)

@@ -685,7 +685,7 @@ class CleanupTest(EndToEndCase):
 
     def setUp(self):
         super().setUp()
-        self.held_root = os.path.join(self.tmp, "Disk", "photos-deleted-on-proton")
+        self.held_root = os.path.join(self.tmp, "Disk", "deleted", "photos")
 
     def held(self, *parts):
         return os.path.join(self.held_root, time.strftime("%Y-%m-%d"), *parts)
@@ -743,6 +743,22 @@ class CleanupTest(EndToEndCase):
         self.assertEqual(read(self.photo("2023", "snow.jpg")), "snow pixels")
         self.assertIn("Extra copies of a photo already in the backup, deleted: 1", out)
         self.assertFalse(os.path.exists(self.held_root))
+
+    def test_album_link_to_an_extra_copy_moves_to_the_copy_that_stays(self):
+        self.with_albums()
+        self.run_main()
+        # the album links a second, identical copy of snow.jpg
+        copy = self.photo("2023", "snow (1).jpg")
+        self.write(copy, "snow pixels")
+        link = os.path.join(self.album_dir, "Holidays", "snow.jpg")
+        os.remove(link)
+        os.link(copy, link)
+        rv, _ = self.run_main()
+        self.assertEqual(rv, 0)
+        self.assertFalse(os.path.exists(copy))
+        self.assertEqual(self.album(), ["beach.jpg", "snow.jpg"])
+        self.assertEqual(os.stat(link).st_ino, os.stat(self.photo("2023", "snow.jpg")).st_ino)
+        self.assertEqual(os.stat(link).st_nlink, 2)
 
     def test_two_proton_photos_with_the_same_content_keep_their_files(self):
         twins = [{"uid": "t1", "name": "twin.jpg", "content": "same", "capture": "2022-01-01T00:00:00Z"},

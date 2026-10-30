@@ -147,8 +147,8 @@ These are consequences of real failures, not style:
   asking, through the shared helpers at the end of `protonlib.py`. They
   delete a file (or an album link) only when the same content (sha1) stays
   in the backup, move the rest to `deleted_dir/<date>/` (default
-  `files-deleted-on-proton` / `photos-deleted-on-proton` next to the
-  backup folder), which they never empty, run only after every download
+  `deleted/files` / `deleted/photos` next to the backup folder, so both
+  backups on one disk share one `deleted` folder), which they never empty, run only after every download
   succeeded, and stop when more than 10% of the backup would go.
 - **Resumable**: every long operation writes a state file and resumes from
   it. A new phase needs its own checkpoint.

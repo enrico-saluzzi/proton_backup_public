@@ -29,11 +29,12 @@ WHAT IT DOES
          content is in the backup at its new path (checked by sha1)
        - deleted on Proton: moved to deleted_dir/<date>/, with their path,
          in case the deletion was a mistake. deleted_dir is by default
-         files-deleted-on-proton next to the backup folder (for
-         /Volumes/Disk/proton-files: /Volumes/Disk/files-deleted-on-proton),
-         so it's easy to browse in Finder; when the backup folder is the
-         root of a disk, set it in the profile (--deleted-dir). The script
-         never empties it: delete what you no longer need.
+         deleted/files next to the backup folder (for
+         /Volumes/Disk/proton-files: /Volumes/Disk/deleted/files, while
+         photo-backup.py uses /Volumes/Disk/deleted/photos), so it's easy to
+         browse in Finder; when the backup folder is the root of a disk,
+         set it in the profile (--deleted-dir). The script never empties
+         it: delete what you no longer need.
      Folders left empty are removed. If more than 10% of the backup would
      go, it stops (wrong folder or proton_root?) unless --force-cleanup.
 
@@ -87,7 +88,7 @@ SCRIPT = "file-backup"
 HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
 # where cleanup moves the files deleted on Proton, next to the backup folder
 # unless deleted_dir says otherwise
-DELETED_DIR = "files-deleted-on-proton"
+DELETED_DIR = os.path.join("deleted", "files")
 
 
 def parse_args():
@@ -117,7 +118,7 @@ def parse_args():
                    help="only report what is no longer on Proton")
     g.add_argument("--deleted-dir",
                    help="where cleanup moves the files deleted on Proton "
-                        "(default: files-deleted-on-proton next to the backup folder)")
+                        "(default: deleted/files next to the backup folder)")
     g.add_argument("--workers", type=int, help="parallel calls while scanning (default 3)")
     g.add_argument("--batch", type=int, help="files per download call (default 20)")
     g.add_argument("--timeout", type=int, help="timeout per download call, in seconds (default 1800)")

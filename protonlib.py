@@ -618,7 +618,7 @@ PROFILE_SETTINGS = {
          "(empty it by hand)"),
         ("deleted_dir", "",
          "where cleanup moves the files deleted on Proton, one folder per date "
-         "(empty = files-deleted-on-proton next to the backup folder)"),
+         "(empty = deleted/files next to the backup folder)"),
         ("workers", "3",
          "parallel calls to the CLI while scanning Proton"),
         ("batch", "20",
@@ -641,7 +641,7 @@ PROFILE_SETTINGS = {
          "deleted, and album folders lose the photos no longer in the album"),
         ("deleted_dir", "",
          "where cleanup moves the photos deleted on Proton, one folder per date "
-         "(empty = photos-deleted-on-proton next to the backup folder)"),
+         "(empty = deleted/photos next to the backup folder)"),
         ("batch", "5",
          "photos per CLI call (bigger batches time out more)"),
         ("timeout", "300",
