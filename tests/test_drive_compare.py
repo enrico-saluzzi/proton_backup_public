@@ -901,17 +901,17 @@ class CompareTest(DriveCompareTestCase):
         self.assertEqual(res.hashed, 0)
 
     def test_zero_byte_placeholder_found_by_name_only(self):
-        self.placeholder("Documenti/Analisi 2023.pdf")
-        self.proton("Documenti/Salute/2023/analisi 2023.pdf", "pdf bytes")
+        self.placeholder("Docs/Report 2023.pdf")
+        self.proton("Docs/Archive/2023/report 2023.pdf", "pdf bytes")
         res = self.run_compare()
-        self.assertEqual(res.moved, [("Documenti/Analisi 2023.pdf",
-                                      "Documenti/Salute/2023/analisi 2023.pdf",
+        self.assertEqual(res.moved, [("Docs/Report 2023.pdf",
+                                      "Docs/Archive/2023/report 2023.pdf",
                                       "same name, content not verified")])
 
     def test_zero_byte_placeholder_with_no_namesake_is_missing(self):
-        self.placeholder("Documenti/unique.pdf")
+        self.placeholder("Docs/unique.pdf")
         self.proton("Other/else.pdf", "x")
-        self.assertEqual(self.run_compare().decide_missing, ["Documenti/unique.pdf"])
+        self.assertEqual(self.run_compare().decide_missing, ["Docs/unique.pdf"])
 
     def test_moved_targets_are_not_counted_as_only_on_proton(self):
         self.here("Old/a.txt", "alpha")
@@ -952,9 +952,9 @@ class CompareTest(DriveCompareTestCase):
         self.assertEqual(res.decide_missing, ["Lavoro/2019 current/y.pdf"])
 
     def test_ignore_is_case_insensitive(self):
-        self.write_ignore("documenti/SALUTE")
-        self.here("Documenti/Salute/x.pdf", "x")
-        self.assertEqual(self.run_compare().ignored, ["Documenti/Salute/x.pdf"])
+        self.write_ignore("docs/HEALTH")
+        self.here("Docs/Health/x.pdf", "x")
+        self.assertEqual(self.run_compare().ignored, ["Docs/Health/x.pdf"])
 
     def test_ignore_matches_nfd_and_nfc_names(self):
         self.write_ignore(unicodedata.normalize("NFD", "Maternità"))
