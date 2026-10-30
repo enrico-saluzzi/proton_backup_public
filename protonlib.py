@@ -172,8 +172,9 @@ def generated_on():
 #
 # Enumerates a Drive tree through `proton-drive filesystem list --json`, one
 # call per folder, in parallel. The macOS File Provider (the Drive folder in
-# Finder) costs ~70 ms per file to enumerate, the CLI ~0.05 ms: seconds
-# instead of hours on a large tree, and it works on headless machines too.
+# Finder) costs ~70 ms per file to enumerate and gives no hashes; the CLI
+# costs about a second per folder (half an hour or more for a few thousand
+# folders), returns the sha1 of every file and works on headless machines.
 #
 # The result is a TSV, one row per file:
 #     relative_path <TAB> size <TAB> mtime_epoch <TAB> sha1 <TAB> flag
@@ -503,6 +504,51 @@ PROFILE_SETTINGS = {
         ("timeout", "1800",
          "seconds before a download call is given up (it's retried on the next run)"),
     ],
+    "photo-backup": [
+        ("dest", "",
+         "the photo backup folder (one subfolder per capture year), e.g. on an "
+         "external disk"),
+        ("albums", "no",
+         "yes = also rebuild every album as a folder of hard links to the photos"),
+        ("album_dir", "album",
+         "where the album folders go: relative to dest, or an absolute path on "
+         "the same disk (hard links can't cross disks)"),
+        ("batch", "5",
+         "photos per CLI call (bigger batches time out more)"),
+        ("timeout", "300",
+         "seconds before a CLI call is given up (failed photos are retried on "
+         "the next run)"),
+    ],
+    "photo-compare": [
+        ("folder", "",
+         "the local photo folder to check against Proton Photos (e.g. a "
+         "Camera Uploads folder), searched recursively"),
+        ("tz", "",
+         "time zone of capture times written without one, e.g. Europe/Rome "
+         "(empty = this Mac's)"),
+        ("tolerance", "1",
+         "seconds of tolerance on capture times (0 = exact)"),
+        ("exif", "yes",
+         "yes = read EXIF dates with exiftool when the file name has none"),
+        ("upload_script", "no",
+         "yes = also write a script that uploads the missing photos"),
+        ("batch", "20",
+         "photos per upload command in the upload script"),
+    ],
+    "photo-prune": [
+        ("timeout", "120",
+         "seconds before a CLI call is given up"),
+    ],
+    "photo-redate": [
+        ("exclude", "",
+         "album names to leave alone, comma-separated"),
+        ("exclude_file", "",
+         "file with one album name to leave alone per line (# for comments)"),
+        ("wait", "20",
+         "with --apply: seconds to wait before looking for the re-uploaded photos"),
+        ("timeout", "600",
+         "seconds before a CLI call is given up"),
+    ],
 }
 # explanations for settings in [DEFAULT], shared by several scripts
 SHARED_HELP = {
@@ -515,8 +561,18 @@ SETTING_CHOICES = {
     "proton_only": ("hide", "list"),
     "copy_script": ("yes", "no"),
     "verify": ("yes", "no"),
+    "albums": ("yes", "no"),
+    "exif": ("yes", "no"),
+    "upload_script": ("yes", "no"),
 }
-SETTING_MINIMUM = {"review_max": 0, "workers": 1, "batch": 1, "timeout": 1}
+SETTING_MINIMUM = {"review_max": 0, "workers": 1, "batch": 1, "timeout": 1,
+                   "tolerance": 0, "wait": 0}
+
+# Scripts that work on another script's backup folder take it from the
+# profile of the same name there: photo-prune.py ssd and photo-redate.py ssd
+# use the dest of [photo-backup ssd]. Their own sections are optional and
+# hold only their own settings, so the folder is written in one place.
+PROFILE_BASE = {"photo-prune": "photo-backup", "photo-redate": "photo-backup"}
 
 
 def setting_help(key):
@@ -615,14 +671,15 @@ def choose_profile(cfg, script, target, config_path):
 
     With no target, the only profile of this script is used. A target that
     looks like a path ("/", "~", ".") is never a profile."""
-    names = profile_names(cfg, script)
+    base = PROFILE_BASE.get(script, script)
+    names = profile_names(cfg, base)
     if target is None:
         if len(names) == 1:
             return names[0]
         if not names:
-            sys.exit(f"ERROR: no {script} profile in {config_path}.\n"
-                     f"  Create one with: ./{script}.py --setup NAME (or pass a folder)")
-        sys.exit(f"ERROR: several {script} profiles in {config_path}: "
+            sys.exit(f"ERROR: no {base} profile in {config_path}.\n"
+                     f"  Create one with: ./{base}.py --setup NAME (or pass a folder)")
+        sys.exit(f"ERROR: several {base} profiles in {config_path}: "
                  f"{', '.join(names)}. Name the one to use.")
     path_like = "/" in target or target.startswith(("~", "."))
     if not path_like and target in names:
@@ -631,19 +688,26 @@ def choose_profile(cfg, script, target, config_path):
         return None
     if cfg.has_section(target):
         sys.exit(f"ERROR: [{target}] in {config_path} is in the old format: rename the "
-                 f"section [{profile_section(script, target)}].")
-    sys.exit(f"ERROR: '{target}' is neither a {script} profile in {config_path} "
+                 f"section [{profile_section(base, target)}].")
+    sys.exit(f"ERROR: '{target}' is neither a {base} profile in {config_path} "
              f"(profiles: {', '.join(names) or 'none yet'}) nor a folder.\n"
-             f"  Create the profile with: ./{script}.py --setup {target}")
+             f"  Create the profile with: ./{base}.py --setup {target}")
 
 
 def load_settings(cfg, script, name):
-    """Defaults, then [DEFAULT], then the profile (if any)."""
+    """Defaults, then [DEFAULT], then the profile (if any). For a script in
+    PROFILE_BASE, the profile's dest comes from the base script's section,
+    and its own section is optional."""
     s = profile_defaults(script)
+    s.update(cfg.defaults())
     if name is None:
-        s.update(cfg.defaults())
-    else:
-        s.update(cfg.items(profile_section(script, name)))
+        return s
+    base = PROFILE_BASE.get(script)
+    if base:
+        s["dest"] = cfg.get(profile_section(base, name), "dest", fallback="")
+    own = profile_section(script, name)
+    if cfg.has_section(own):
+        s.update(cfg.items(own))
     return s
 
 

@@ -29,7 +29,8 @@ python3 -m unittest discover -s tests -v
 
 Unit tests live in `tests/` (unittest, no pytest), one file per module:
 `test_protonlib.py` (configuration and profiles), `test_drive_compare.py`,
-`test_file_backup.py`. Each test loads the script fresh with
+`test_file_backup.py`, `test_photo_backup.py`, `test_photo_compare.py`,
+`test_photo_prune.py`, `test_photo_redate.py`. Each test loads the script fresh with
 `HOME` set to a temporary folder and talks to a fake `proton-drive` written
 by the test. Add a test with every change to a covered script, and a test
 file when a script gains real logic.
@@ -68,7 +69,9 @@ protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    (within 24 h); complete ones remove them.
 
 config.ini      -> ~/.config/proton-backup/config.ini (or --config): profiles
-                   [<script> <name>] for file-backup.py and drive-compare.py,
+                   [<script> <name>] for every script; photo-prune.py and
+                   photo-redate.py take dest from [photo-backup <name>]
+                   (PROFILE_BASE), their own sections are optional;
                    [DEFAULT] shared. Read and written through protonlib
                    (PROFILE_SETTINGS declares every setting, its default and
                    its help); --setup rewrites the whole file with comments,

@@ -14,10 +14,11 @@ WHY
   while keeping the exact same size.
 
 WHAT IT DOES
-  1. scans the remote folder (--root, default /my-files) through the CLI:
-     seconds even on tens of thousands of files, where the macOS Drive folder
-     takes hours. The scan is saved in ~/drive-sync-logs; if it gets
-     interrupted, run the same command again and it resumes.
+  1. scans the remote folder (--root, default /my-files) through the CLI, one
+     call per folder: about a second per folder, half an hour or more on a
+     large Drive. The scan is saved in ~/drive-sync-logs; if it gets
+     interrupted, run the same command again and it resumes; --reuse-scan
+     uses the last complete one.
   2. compares it with the files in the backup folder
   3. downloads what is missing and what has a different size
   4. verifies (verify = yes, the default): recomputes the local sha1 and

@@ -34,12 +34,20 @@ SAFETY
   - resumable: progress is saved in prune-state.json in the backup folder
 
   After pruning, bring the backup in line (without --reuse-inventory):
-      ./photo-backup.py DEST --albums ...
+      ./photo-backup.py
+
+PROFILES
+  The backup folder comes from the photo-backup.py profile of the same name
+  ([photo-backup <name>] in ~/.config/proton-backup/config.ini, or --config):
+  ./photo-prune.py ssd works on its dest, and with a single photo-backup
+  profile no name is needed. An optional [photo-prune <name>] section can set
+  timeout. A folder path works too.
 
 USAGE
-  ./photo-prune.py DEST --from-missing --dry-run
-  ./photo-prune.py DEST --from-missing --apply
-  ./photo-prune.py DEST --from-list duplicates.txt --apply
+  ./photo-prune.py --from-missing --dry-run
+  ./photo-prune.py --from-missing --apply
+  ./photo-prune.py ssd --from-list duplicates.txt --apply
+  ./photo-prune.py /path/to/backup/proton-photos --from-missing --apply
 """
 
 import argparse
@@ -55,9 +63,19 @@ ALBUM_MAP = ".proton-albums.json"
 STATE = "prune-state.json"
 
 
+SCRIPT = "photo-prune"
+
+
 def parse_args():
-    p = argparse.ArgumentParser(description="Propagate local photo deletions to Proton.")
-    p.add_argument("dest", help="photo backup folder")
+    p = argparse.ArgumentParser(
+        description="Propagate local photo deletions to Proton.",
+        epilog="Settings: ~/.config/proton-backup/config.ini (see config.example.ini). "
+               "The backup folder comes from the photo-backup profile of the same name.")
+    p.add_argument("target", nargs="?",
+                   help="a photo-backup profile (optional when there's only one), "
+                        "or the photo backup folder")
+    p.add_argument("--config", default=protonlib.CONFIG_PATH,
+                   help="configuration file (default ~/.config/proton-backup/config.ini)")
     p.add_argument("--from-list", default=None,
                    help="file with lines 'delete <path>'")
     p.add_argument("--from-missing", action="store_true",
@@ -68,16 +86,44 @@ def parse_args():
     p.add_argument("--apply", action="store_true", help="actually do it")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--limit", type=int, default=0, help="handle at most N photos")
-    p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("--timeout", type=int,
+                   help="timeout per CLI call, in seconds (default 120)")
     a = p.parse_args()
-    a.dest = os.path.expanduser(a.dest)
+    a.config = os.path.expanduser(a.config)
     if not a.from_list and not a.from_missing:
         sys.exit("Choose --from-list FILE or --from-missing")
     return a
 
 
+def resolve_settings(a):
+    """The backup folder and the timeout, copied onto `a`."""
+    cfg = protonlib.read_config(a.config)
+    name = protonlib.choose_profile(cfg, SCRIPT, a.target, a.config)
+    s = protonlib.load_settings(cfg, SCRIPT, name)
+    if name is None:
+        s["dest"] = a.target
+        where = "command line"
+    else:
+        where = f"profile [photo-backup {name}] in {a.config}"
+        if not s["dest"]:
+            sys.exit(f"ERROR: [photo-backup {name}] in {a.config} has no dest. "
+                     f"Run: ./photo-backup.py --setup {name}")
+    if a.timeout is not None:
+        s["timeout"] = str(a.timeout)
+    protonlib.check_settings(s, where)
+    a.dest = os.path.expanduser(s["dest"])
+    a.timeout = s["timeout"]
+    a.where = where
+    if not os.path.isdir(a.dest):
+        sys.exit(f"ERROR: {a.dest} doesn't exist ({where}). Is the disk plugged in?")
+    return a
+
+
+
 def main():
     a = parse_args()
+    resolve_settings(a)
+    print(f"  Backup : {a.dest}   ({a.where})")
     mp = os.path.join(a.dest, PHOTO_MAP)
     if not os.path.exists(mp):
         sys.exit(f"ERROR: {mp} is missing. Run photo-backup.py first.")
@@ -213,7 +259,7 @@ def main():
     print("")
     print("  The photos are in Proton's trash, recoverable with no expiry.")
     print("  After checking, regenerate inventory, map and albums:")
-    print("    ./photo-backup.py DEST --albums ...")
+    print("    ./photo-backup.py" + (f" {a.dest}" if a.where == "command line" else ""))
     return 1 if errors else 0
 
 

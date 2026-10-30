@@ -13,8 +13,8 @@ WHY
   file, so the comparison goes down to the CONTENT without downloading
   anything from Proton: computing the sha1 locally is enough.
 
-  The scan takes seconds even on tens of thousands of files and is saved in
-  ~/drive-sync-logs. If it gets interrupted, run the same command again and
+  The scan takes about a second per Proton folder (half an hour or more on a
+  large Drive) and is saved in ~/drive-sync-logs. If it gets interrupted, run the same command again and
   it resumes; --reuse-scan skips it and uses the last complete one.
 
 PROFILES
