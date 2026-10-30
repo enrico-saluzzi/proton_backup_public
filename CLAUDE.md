@@ -142,6 +142,12 @@ These are consequences of real failures, not style:
   replaces `:` and other characters when writing to disk.
 - **Dry-run by default**: anything that deletes or trashes requires
   `--apply`, shows the list first, and refuses to leave an album empty.
+  One exception, local only: `file-backup.py` with `cleanup = yes` (off by
+  default) keeps the backup in step with Proton without asking. It deletes
+  a file only when the same content (sha1) is in the backup at its new
+  path, moves the rest to `.deleted-on-proton/<date>/`, which it never
+  empties, runs only after every download succeeded, and stops when more
+  than 10% of the backup would go.
 - **Resumable**: every long operation writes a state file and resumes from
   it. A new phase needs its own checkpoint.
 - **Write state and saved inventories with `protonlib.write_json`** (or a
