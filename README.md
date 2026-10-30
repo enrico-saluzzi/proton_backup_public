@@ -11,7 +11,7 @@ a ~36,000-photo library onto an external SSD.
 
 - Python 3 standard library only: nothing to `pip install`.
 - Every long-running script is **interruptible and resumable**.
-- Everything that deletes or trashes is **off or dry-run by default**.
+- Everything that deletes or trashes on Proton is **dry-run by default**.
 
 > Independent project, not affiliated with or endorsed by Proton AG.
 
@@ -147,8 +147,9 @@ Then, every month:
 - If the disk isn't plugged in, the script stops instead of creating the
   backup folder on the internal disk. (A folder path given on the command
   line, `./file-backup.py $B/proton-files`, is created if missing.)
-- With `cleanup = yes` (off by default; `--cleanup`/`--no-cleanup` for one
-  run) the backup follows Proton instead of keeping old files forever:
+- The backup follows Proton instead of keeping old files forever
+  (`cleanup = yes`, the default; `cleanup = no` or `--no-cleanup` turns it
+  off):
   - a file **moved or renamed** on Proton: its old copy is deleted, once the
     same content (sha1) is in the backup at the new path;
   - a file **deleted** on Proton: it's moved to `.deleted-on-proton/<date>/`

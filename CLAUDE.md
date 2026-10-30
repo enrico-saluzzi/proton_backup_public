@@ -142,7 +142,7 @@ These are consequences of real failures, not style:
   replaces `:` and other characters when writing to disk.
 - **Dry-run by default**: anything that deletes or trashes requires
   `--apply`, shows the list first, and refuses to leave an album empty.
-  One exception, local only: `file-backup.py` with `cleanup = yes` (off by
+  One exception, local only: `file-backup.py` with `cleanup = yes` (the
   default) keeps the backup in step with Proton without asking. It deletes
   a file only when the same content (sha1) is in the backup at its new
   path, moves the rest to `.deleted-on-proton/<date>/`, which it never
