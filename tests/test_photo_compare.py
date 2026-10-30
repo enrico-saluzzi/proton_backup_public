@@ -451,6 +451,22 @@ class EndToEndTest(PhotoCompareTestCase):
             exif = no
             """)
 
+    def test_photo_libraries_are_skipped_and_named(self):
+        library = os.path.join(self.camera, "Photos Library.photoslibrary")
+        self.write(os.path.join(library, "resources", "derivatives", "thumb.jpg"), "thumb")
+        self.write(os.path.join(library, "originals", "A", "IMG_9.heic"), "original")
+        self.camera_profile()
+        rc, out = self.run_main()
+        self.assertIn("Skipped 1 photo libraries", out)
+        self.assertIn(library, out)
+        self.assertIn("Local photos and videos ........ 3", out)
+        self.assertNotIn("thumb.jpg", out)
+
+    def test_a_photo_library_as_the_folder_is_an_error(self):
+        library = self.mkdir("Pictures", "Photos Library.photoslibrary")
+        self.assertExits(lambda: self.run_main(library), "is a photo library",
+                         "Export Unmodified Original")
+
     def test_timeline_is_saved_in_one_file_and_reused_with_reuse_scan(self):
         self.camera_profile()
         self.run_main()
