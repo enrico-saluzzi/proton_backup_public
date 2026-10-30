@@ -257,6 +257,43 @@ def suggest_reuse(path, what, option):
     sys.stderr.write("\r" + " " * 40 + "\r")
 
 
+def _process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_scan(out, root):
+    """One scan of a root at a time: file-backup.py and drive-compare.py
+    share the scan, and two of them writing the same .partial file would
+    mix their results. A lock left by a process that no longer runs is
+    taken over."""
+    lock = out + ".lock"
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(lock) as f:
+                    pid = int(f.read().strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+            if pid and _process_alive(pid):
+                sys.exit(f"ERROR: another script (pid {pid}) is scanning {root} right now.\n"
+                         "  Wait for it to finish, then run again with --reuse-scan to use "
+                         f"its scan.\n  (If no scan is running, remove {lock}.)")
+            os.remove(lock)
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return lock
+    sys.exit(f"ERROR: can't lock the scan of {root}: remove {lock} if no scan is running.")
+
+
 def _escape_name(name):
     return name.replace("/", "\\/")
 
@@ -442,6 +479,17 @@ def scan_drive(cli, root, workers=3, delay=0.2, timeout=300, retries=3, log_dir=
     """
     os.makedirs(log_dir, exist_ok=True)
     out = scan_path(root, log_dir)
+    lock = _lock_scan(out, root)
+    try:
+        return _scan_locked(cli, root, out, workers, delay, timeout, retries)
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+
+
+def _scan_locked(cli, root, out, workers, delay, timeout, retries):
     partial = out + ".partial"
     state = out + ".state"
     # a scan interrupted before .partial existed wrote straight into the TSV:

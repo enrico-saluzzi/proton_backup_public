@@ -69,7 +69,9 @@ protonlib.scan_drive() -> ~/drive-sync-logs/<root>.tsv (path, size, mtime, sha1,
                    only when complete (scan_complete() tells which); an
                    interrupted one keeps .partial/.state/.queue and resumes
                    (within 24 h). A complete scan younger than an hour gets a
-                   --reuse-scan hint and a 10 s pause in a terminal.
+                   --reuse-scan hint and a 10 s pause in a terminal. <tsv>.lock
+                   (pid) allows one scan per root at a time; a lock whose
+                   process is gone is taken over.
 
 config.ini      -> ~/.config/proton-backup/config.ini (or --config): profiles
                    [<script> <name>] for every script; photo-prune.py and

@@ -350,7 +350,7 @@ class ResolveSettingsTest(PhotoBackupTestCase):
         self.assertEqual(a.limit, 0)
         self.assertIs(a.dry_run, False)
         a = self.resolve("ssd", "--limit", "2", "--dry-run", "--import", "~/Downloads",
-                         "--reuse-inventory", "--skip-failed", "--redownload-missing")
+                         "--reuse-scan", "--skip-failed", "--redownload-missing")
         self.assertEqual(a.limit, 2)
         self.assertTrue(a.dry_run and a.reuse_scan and a.skip_failed
                         and a.redownload_missing)
@@ -525,13 +525,6 @@ class EndToEndTest(PhotoBackupTestCase):
         self.assertEqual(rv, 0)
         self.assertIn("Timeline reused", out)
         self.assertIn("Album list reused", out)
-        self.assertEqual(len(self.timeline_calls()), 1)
-
-    def test_reuse_inventory_is_still_accepted(self):
-        self.profile()
-        self.run_main()
-        rv, out = self.run_main("--reuse-inventory")
-        self.assertIn("Timeline reused", out)
         self.assertEqual(len(self.timeline_calls()), 1)
 
     def test_recent_timeline_suggests_reuse_scan(self):

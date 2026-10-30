@@ -135,8 +135,6 @@ def parse_args():
     p.add_argument("--reuse-scan", action="store_true",
                    help="reuse the timeline and album list saved last time instead of "
                         "reading them from Proton")
-    p.add_argument("--reuse-inventory", dest="reuse_scan", action="store_true",
-                   help=argparse.SUPPRESS)       # old name
     p.add_argument("--skip-failed", action="store_true",
                    help=f"don't retry the photos listed in {FAILED}")
     p.add_argument("--dry-run", action="store_true",

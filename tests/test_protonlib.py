@@ -15,6 +15,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import unittest
@@ -759,6 +760,55 @@ class ScanDriveTest(ScriptTestCase):
         self.assertIn("--reuse-scan", str(cm.exception.code))
         self.assertEqual(read(self.tsv), before)
         self.assertEqual(len(self.cli_calls("filesystem", "list")), calls)
+
+    def test_lock_is_removed_after_a_complete_or_failed_scan(self):
+        self.drive({"/my-files/a.txt": "a", "/my-files/B/b.txt": "b"})
+        self.scan()
+        self.assertFalse(os.path.exists(self.tsv + ".lock"))
+        self.drive({"/my-files/a.txt": "a", "/my-files/B/b.txt": "b"}, fail_list=["/my-files/B"])
+        _, errors, _ = self.scan()
+        self.assertTrue(errors)
+        self.assertFalse(os.path.exists(self.tsv + ".lock"))
+
+    def test_lock_is_removed_when_the_scan_is_interrupted(self):
+        self.drive({"/my-files/a.txt": "a"})
+        with mock.patch.object(self.plib._Scanner, "run", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.scan()
+        self.assertFalse(os.path.exists(self.tsv + ".lock"))
+
+    def test_second_scan_of_the_same_root_stops(self):
+        # a running process holds the lock: this very test process
+        self.drive({"/my-files/a.txt": "a"})
+        with open(self.tsv + ".lock", "w") as f:
+            f.write(str(os.getpid()))
+        with self.assertRaises(SystemExit) as cm:
+            self.scan()
+        self.assertIn("is scanning /my-files right now", str(cm.exception.code))
+        self.assertIn("--reuse-scan", str(cm.exception.code))
+        self.assertEqual(self.cli_calls("filesystem", "list"), [])
+        self.assertTrue(os.path.exists(self.tsv + ".lock"))      # not ours to remove
+
+    def test_lock_of_a_process_that_no_longer_runs_is_taken_over(self):
+        self.drive({"/my-files/a.txt": "a"})
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        with open(self.tsv + ".lock", "w") as f:
+            f.write(str(dead.pid))
+        _, errors, _ = self.scan()
+        self.assertEqual(errors, [])
+        self.assertEqual(self.paths(self.tsv), ["a.txt"])
+        self.assertFalse(os.path.exists(self.tsv + ".lock"))
+
+    def test_scans_of_different_roots_dont_block_each_other(self):
+        self.drive({"/my-files/a.txt": "a", "/my-files/W/w.txt": "w"})
+        with open(self.tsv + ".lock", "w") as f:
+            f.write(str(os.getpid()))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            tsv, errors = self.plib.scan_drive(self.cli, "/my-files/W", workers=1,
+                                               delay=0, retries=1)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.paths(tsv), ["w.txt"])
 
     def test_countdown_only_in_a_terminal(self):
         self.drive({"/my-files/a.txt": "a"})

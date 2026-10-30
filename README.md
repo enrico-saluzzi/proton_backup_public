@@ -70,7 +70,9 @@ and uses the last complete one. A new scan replaces the last complete one
 only when it completes, so stopping it never loses the previous scan. When the
 last complete scan is less than an hour old, the script says so and waits 10
 seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed
-on Proton since.
+on Proton since. The two scripts share the scan, so only one can scan a given
+folder at a time: the second one stops and says to wait and then use
+`--reuse-scan`.
 
 Both read their choices from **profiles** in one configuration file, shared
 with `photo-backup.py`: `~/.config/proton-backup/config.ini` (another one with
