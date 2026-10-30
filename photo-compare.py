@@ -50,7 +50,18 @@ UPLOAD SCRIPT
   this comparison again. Online-only files must be made available offline
   first: the script skips files that are empty when it runs.
 
+PROFILES
+  The folder and the options can live in a profile, in the same
+  configuration file as the other scripts: ~/.config/proton-backup/config.ini
+  (another one with --config), section [photo-compare <name>]. Create or
+  change one with ./photo-compare.py --setup camera, then run
+  ./photo-compare.py camera, or just ./photo-compare.py when it's the only
+  photo-compare profile. Folder paths work too, with the defaults.
+  Command-line options override the profile.
+
 USAGE
+  ./photo-compare.py --setup camera
+  ./photo-compare.py camera
   ./photo-compare.py ~/Dropbox/"Camera Uploads"
   ./photo-compare.py ~/Dropbox/"Camera Uploads" ~/Pictures/Phone --upload-script
   ./photo-compare.py ~/Dropbox/"Camera Uploads" --inventory ~/drive-sync-logs/proton-photo-timeline-<stamp>.json
@@ -88,41 +99,127 @@ EXIF_TIME = re.compile(
     r"^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d+)?([+-]\d{2}:\d{2}|Z)?$")
 
 
+SCRIPT = "photo-compare"
+HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
+
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Which local photos are missing from Proton Photos?")
-    p.add_argument("folders", nargs="+", help="local folders with photos (searched recursively)")
+        description="Which local photos are missing from Proton Photos?",
+        epilog="Settings: ~/.config/proton-backup/config.ini (see config.example.ini). "
+               "Options given here override the profile.")
+    p.add_argument("targets", nargs="*", metavar="target",
+                   help="a profile from the configuration file (optional when there's "
+                        "only one), or local folders with photos (searched recursively)")
+    p.add_argument("--setup", action="store_true",
+                   help="create or change the profile named by TARGET, asking questions")
+    p.add_argument("--config", default=protonlib.CONFIG_PATH,
+                   help="configuration file (default ~/.config/proton-backup/config.ini)")
+    g = p.add_argument_group("settings (override the profile)")
+    g.add_argument("--tz",
+                   help="time zone of capture times without one, e.g. Europe/Rome "
+                        "(default: this Mac's time zone)")
+    g.add_argument("--tolerance", type=int,
+                   help="seconds of tolerance on capture times (default 1, 0 = exact)")
+    ex = g.add_mutually_exclusive_group()
+    ex.add_argument("--exif", dest="exif", action="store_const", const="yes",
+                    help="read EXIF dates with exiftool (the default)")
+    ex.add_argument("--no-exif", dest="exif", action="store_const", const="no",
+                    help="don't read EXIF dates with exiftool")
+    g.add_argument("--upload-script", dest="upload_script", action="store_const", const="yes",
+                   help="also write a script that uploads the missing photos to Proton")
+    g.add_argument("--batch", type=int,
+                   help="photos per upload command in the upload script (default 20)")
     p.add_argument("--inventory", default=None,
                    help="reuse a saved Proton timeline (JSON from `photo timeline -d -j`) "
                         "instead of reading it again")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
-    p.add_argument("--tz", default=None,
-                   help="time zone of capture times without one, e.g. Europe/Rome "
-                        "(default: this Mac's time zone)")
-    p.add_argument("--tolerance", type=int, default=1,
-                   help="seconds of tolerance on capture times (default 1, 0 = exact)")
-    p.add_argument("--no-exif", action="store_true",
-                   help="don't read EXIF dates with exiftool")
     p.add_argument("--exiftool", default="exiftool")
     p.add_argument("--out-dir", default=os.path.expanduser("~/drive-sync-logs"))
     p.add_argument("--label", default=None,
-                   help="label used in output file names (default: name of the first folder)")
+                   help="label used in output file names (default: the profile, or the "
+                        "name of the first folder)")
     p.add_argument("--max-print", type=int, default=30)
-    p.add_argument("--upload-script", action="store_true",
-                   help="also write a script that uploads the missing photos to Proton")
-    p.add_argument("--batch", type=int, default=20,
-                   help="photos per upload command in the upload script (default 20)")
     a = p.parse_args()
-    a.folders = [os.path.expanduser(f) for f in a.folders]
+    a.config = os.path.expanduser(a.config)
     a.out_dir = os.path.expanduser(a.out_dir)
+    if a.setup and len(a.targets) > 1:
+        p.error("--setup takes one profile name")
+    return a
+
+
+def resolve_settings(a):
+    """Settings for this run, copied onto `a` (a.folders, a.tz, a.tzinfo,
+    a.tolerance, a.no_exif, a.upload_script, a.batch, a.label)."""
+    cfg = protonlib.read_config(a.config)
+    name = None
+    if len(a.targets) <= 1:
+        name = protonlib.choose_profile(cfg, SCRIPT, (a.targets or [None])[0], a.config)
+    s = protonlib.load_settings(cfg, SCRIPT, name)
+    if name is None:
+        folders = a.targets
+        where = "defaults and command line"
+    else:
+        where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
+        if not s["folder"]:
+            sys.exit(f"ERROR: {where} has no folder. Run: ./{SCRIPT}.py --setup {name}")
+        folders = [s["folder"]]
+    for k in ("tz", "tolerance", "exif", "upload_script", "batch"):
+        v = getattr(a, k)
+        if v is not None:
+            s[k] = str(v)
+    protonlib.check_settings(s, where)
+
+    a.profile, a.where = name, where
+    a.folders = [os.path.expanduser(f) for f in folders]
+    for d in a.folders:
+        if not os.path.isdir(d):
+            sys.exit(f"ERROR: {d} doesn't exist ({where})")
+    a.tz = s["tz"] or None
+    a.tolerance, a.batch = s["tolerance"], s["batch"]
+    a.no_exif = s["exif"] == "no"
+    a.upload_script = s["upload_script"] == "yes"
     if not a.label:
-        a.label = os.path.basename(a.folders[0].rstrip(os.sep)) or "photos"
+        a.label = name or os.path.basename(a.folders[0].rstrip(os.sep)) or "photos"
     a.label = re.sub(r"[^A-Za-z0-9._-]+", "_", a.label).strip("_") or "photos"
     a.tzinfo = None
     if a.tz:
-        from zoneinfo import ZoneInfo
-        a.tzinfo = ZoneInfo(a.tz)
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            a.tzinfo = ZoneInfo(a.tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            sys.exit(f"ERROR: unknown time zone {a.tz!r} ({where}), e.g. Europe/Rome")
     return a
+
+
+def setup_questions(cur):
+    ask = protonlib.ask
+    new = {}
+    print("")
+    print(f"  {HELP['folder']}")
+    new["folder"] = protonlib.ask_existing_folder(
+        "folder", cur["folder"] or "~/Dropbox/Camera Uploads")
+    for k in ("tz", "tolerance", "exif", "upload_script", "batch"):
+        print("")
+        print(f"  {HELP[k]}")
+        if k == "tz":
+            while True:
+                v = ask(k, cur[k] or "this Mac's")
+                v = "" if v == "this Mac's" else v
+                if not v:
+                    break
+                try:
+                    from zoneinfo import ZoneInfo
+                    ZoneInfo(v)
+                    break
+                except Exception:
+                    print("    unknown time zone, e.g. Europe/Rome")
+            new[k] = v
+            continue
+        new[k] = ask(k, cur[k], protonlib.SETTING_CHOICES.get(k),
+                     protonlib.SETTING_MINIMUM.get(k))
+    return new
+
 
 
 def kind_of_ext(ext):
@@ -380,9 +477,10 @@ def match(a, files, by_sha, by_sec, info):
 
 def main():
     a = parse_args()
-    for d in a.folders:
-        if not os.path.isdir(d):
-            sys.exit(f"ERROR: {d} doesn't exist")
+    if a.setup:
+        return protonlib.run_setup(a.config, SCRIPT, (a.targets or [None])[0],
+                                   setup_questions)
+    resolve_settings(a)
     stamp = time.strftime("%Y%m%d-%H%M%S")
 
     print("")
@@ -482,7 +580,8 @@ def main():
             paths = sorted(f["path"] for f in missing)
             calls = [["My Photos"] + paths[i:i + a.batch]
                      for i in range(0, len(paths), a.batch)]
-            folders = " ".join(shlex.quote(d) for d in a.folders)
+            folders = (shlex.quote(a.profile) if a.profile
+                       else " ".join(shlex.quote(d) for d in a.folders))
             path = os.path.join(a.out_dir, f"photos-upload-{a.label}-{stamp}.sh")
             protonlib.write_upload_script(
                 path, a.cli,

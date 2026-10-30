@@ -278,7 +278,8 @@ class CheckSettingsTest(ScriptTestCase):
 
     def test_expected_minimums(self):
         self.assertEqual(self.plib.SETTING_MINIMUM,
-                         {"review_max": 0, "workers": 1, "batch": 1, "timeout": 1})
+                         {"review_max": 0, "workers": 1, "batch": 1, "timeout": 1,
+                          "tolerance": 0, "wait": 0})
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +407,11 @@ class ConfigFileTest(ScriptTestCase):
                 self.assertRegex(name, self.plib.PROFILE_RE)
                 s = self.plib.load_settings(cfg, script, name)
                 known = set(self.plib.profile_defaults(script)) | set(cfg.defaults())
+                base = self.plib.PROFILE_BASE.get(script)
+                if base:
+                    # the backup folder comes from the base script's profile
+                    self.assertTrue(cfg.has_section(self.plib.profile_section(base, name)))
+                    self.assertTrue(s.pop("dest"))
                 self.assertEqual(set(s) - known, set(), "unknown keys")
                 self.plib.check_settings(s, f"[{section}] in config.example.ini")
 

@@ -60,17 +60,19 @@ single command and does everything it needs by itself.
 | check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and
-**sha1** of every file, in parallel, in seconds even on tens of thousands of
-files (the macOS Drive folder takes hours to enumerate). `--root` picks the
+**sha1** of every file. The CLI lists one folder per call, three calls in
+parallel: count about a second per folder, so **half an hour or more** for a
+Drive with a few thousand folders. `--root` picks the
 remote folder (default `/my-files`, the whole Drive). The scan is saved in
 `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
 command stops, and running it again resumes the scan; `--reuse-scan` skips it
 and uses the last complete one.
 
-Both read their choices from **profiles** in one configuration file,
-`~/.config/proton-backup/config.ini` (another one with `--config`): a section
-per profile, `[file-backup ssd]`, `[drive-compare dropbox]`, with `[DEFAULT]`
-for what they share. `--setup NAME` creates or changes a profile by asking
+Both read their choices from **profiles** in one configuration file, shared
+with `photo-backup.py`: `~/.config/proton-backup/config.ini` (another one with
+`--config`), a section per profile, `[file-backup ssd]`,
+`[drive-compare dropbox]`, `[photo-backup ssd]`, with `[DEFAULT]` for what
+they share. `--setup NAME` creates or changes a profile by asking
 one question at a time; [`config.example.ini`](config.example.ini) documents
 every setting. With a single profile, the script name alone is enough.
 Options on the command line override the profile, and a folder path still
@@ -80,10 +82,18 @@ works instead of a profile name.
 
 | I want to... | Script |
 |---|---|
-| back up my Photos, in year folders and albums | `photo-backup.py --albums` |
+| back up my Photos, in year folders and albums | `photo-backup.py` (set up once with `--setup`) |
+| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | `photo-compare.py` (set up once with `--setup`) |
 | delete photos by browsing the backup, then trash them on Proton too | `photo-prune.py` |
 | fix the date of scanned prints that sit in the wrong year | `photo-redate.py`, then `--apply` |
-| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | `photo-compare.py --upload-script` |
+
+The photo scripts use profiles too, in the same configuration file:
+`[photo-backup ssd]` (the backup folder, the albums) and
+`[photo-compare camera]` (the folder to check). `photo-prune.py` and
+`photo-redate.py` work on the backup folder of the `photo-backup` profile
+with the same name, so it's written once: with a single profile, no name is
+needed at all. Their own sections, `[photo-redate ssd]` for instance with the
+albums to leave alone, are optional.
 
 The Photos section isn't synced by the desktop client and isn't a filesystem
 path: it only exists through the CLI's `photo` and `album` commands, which is
@@ -211,15 +221,30 @@ scanned top-level folders exist in the chosen folder.
 
 #### Monthly backup
 
+Once, describe the backup as a profile: the photo folder, whether to build
+the albums, and where:
+
 ```bash
-./photo-backup.py $B/proton-photos --albums --album-dir $B/proton-albums
+./photo-backup.py --setup ssd
+```
+
+Then, every month:
+
+```bash
+./photo-backup.py
 ```
 
 The result is two views of the same photos: `proton-photos/<year>/` in
 chronological order, and `proton-albums/<album>/` organized like on Proton.
 
-- Downloads go in batches of 5: bigger batches time out often on large
-  libraries, and every timeout wastes the whole batch.
+- Downloads go in batches of 5 (`batch`): bigger batches time out often on
+  large libraries, and every timeout wastes the whole batch. If many calls
+  time out, a shorter `timeout` than the default 300 s can make the run
+  faster: a stuck call is given up sooner and retried on the next run.
+- `album_dir` must be on the same disk as the photos: the albums are hard
+  links. `--no-albums` skips them for one run.
+- If the disk isn't plugged in, the script stops instead of creating the
+  backup folder on the internal disk.
 - The summary reports, with a full list next to the photos:
   - photos **deleted from the backup but still on Proton**: deleted on
     purpose, see *Pruning photos*; by accident, run again with
@@ -229,39 +254,6 @@ chronological order, and `proton-albums/<album>/` organized like on Proton.
   `_modified`) can be downloaded by hand from the web interface and added with
   `--import ~/Downloads`.
 
-#### Pruning photos
-
-Delete the photos you don't want **from the backup, in Finder**, looking at
-them (the macOS Trash is your safety net). Then:
-
-```bash
-./photo-prune.py $B/proton-photos --from-missing --dry-run
-./photo-prune.py $B/proton-photos --from-missing --apply
-```
-
-Then run the monthly photo backup again. Proton's trash has no expiry.
-
-#### Fixing dates of scanned photos
-
-Prints scanned years later have a capture date that is technically right but
-semantically wrong: a 2003 event shows up in 2019. If your albums are named
-starting with the year (`2003 - Holiday in Rome`), the albums know better:
-
-```bash
-./photo-redate.py $B/proton-photos --exclude-file excluded.txt   # plan only
-./photo-redate.py $B/proton-photos --apply --limit 5             # try a few
-./photo-redate.py $B/proton-photos --apply
-```
-
-Proton uses `DateTimeOriginal` for the timeline but has no command to edit
-metadata, so the only way is to re-upload a corrected copy. `--apply` uses the
-plan you reviewed, and is resumable.
-
-- **Videos are skipped**: QuickTime date tags are ignored and a re-uploaded
-  video lands at its upload date.
-- **Side effect**: editing an album moves it to the top of the album list on
-  Proton, and the order can't be changed.
-
 #### Migrating from another cloud (e.g. Camera Uploads)
 
 Typical case: a Dropbox `Camera Uploads` folder, while the same phone also
@@ -269,16 +261,19 @@ synced its photos to Proton Photos. Exclude that folder from `drive-compare.py`
 and check it against the Photos section instead:
 
 ```bash
-./photo-compare.py ~/Dropbox/"Camera Uploads" --upload-script
+./photo-compare.py --setup camera    # once: the folder, time zone, upload script
+./photo-compare.py
 ```
+
+(or, without a profile, `./photo-compare.py ~/Dropbox/"Camera Uploads" --upload-script`)
 
 Names can't be compared (Dropbox renames uploads after their capture time,
 the phone uploads `IMG_1234.HEIC`), and the bytes often differ too. So photos
 are matched by **identical content** when the file is on disk, otherwise by
 **capture time** (from the Dropbox file name, which works even on online-only
 placeholders, or from EXIF), one Proton photo per local file, same kind
-(photo/video). Times without a zone are read in this Mac's time zone (`--tz`
-to change it).
+(photo/video). Times without a zone are read in this Mac's time zone (`tz` in
+the profile, or `--tz`, to change it).
 
 - Each missing photo comes with a reason. "The Proton photo at that time
   matches another local file" means two local photos share the same second
@@ -290,6 +285,40 @@ to change it).
   empty when it runs: make the folder **available offline** before running it.
 - The Proton timeline is saved in `~/drive-sync-logs`; pass it back with
   `--inventory` to avoid reading it again while you iterate.
+
+#### Pruning photos
+
+Delete the photos you don't want **from the backup, in Finder**, looking at
+them (the macOS Trash is your safety net). Then:
+
+```bash
+./photo-prune.py --from-missing --dry-run
+./photo-prune.py --from-missing --apply
+```
+
+Then run the monthly photo backup again. Proton's trash has no expiry.
+
+#### Fixing dates of scanned photos
+
+Prints scanned years later have a capture date that is technically right but
+semantically wrong: a 2003 event shows up in 2019. If your albums are named
+starting with the year (`2003 - Holiday in Rome`), the albums know better:
+
+```bash
+./photo-redate.py --setup ssd        # once: albums to leave alone (exclude_file)
+./photo-redate.py                    # plan only
+./photo-redate.py --apply --limit 5  # try a few
+./photo-redate.py --apply
+```
+
+Proton uses `DateTimeOriginal` for the timeline but has no command to edit
+metadata, so the only way is to re-upload a corrected copy. `--apply` uses the
+plan you reviewed, and is resumable.
+
+- **Videos are skipped**: QuickTime date tags are ignored and a re-uploaded
+  video lands at its upload date.
+- **Side effect**: editing an album moves it to the top of the album list on
+  Proton, and the order can't be changed.
 
 ---
 
@@ -348,8 +377,10 @@ NFD on macOS: pass it the NFC form and it answers "Node not found".
 **macOS doesn't allow `:` in file names** and the CLI replaces it with `_`.
 Without accounting for that, the same file is both missing and orphaned.
 
-**Enumerating Proton through the File Provider costs ~70 ms per file**, the CLI
-~0.05 ms. On large folders that's the difference between seconds and hours.
+**Enumerating Proton through the File Provider costs ~70 ms per file** and
+gives no hashes. The CLI costs about a second per folder, returns the sha1 of
+every file and works on a headless machine: slow too on a large Drive, so the
+scan is saved, resumable, and reusable with `--reuse-scan`.
 
 **The Photos section** isn't synced by the client and isn't a filesystem path:
 it only exists through `photo timeline`, `photo download` and `album list`,

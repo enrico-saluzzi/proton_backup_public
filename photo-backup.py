@@ -41,17 +41,32 @@ WHAT EACH RUN DOES
   (--skip-failed leaves them out).
 
 ALBUMS
-  Album folders go in --album-dir (default: "album" inside the backup
-  folder); they must be on the same volume as the photos (symlinks are used
-  otherwise). Two different photos of an album with the same file name both
+  Album folders go in album_dir (--album-dir; default: "album" inside the
+  backup folder); they must be on the same volume as the photos (symlinks are
+  used otherwise). Two different photos of an album with the same file name both
   appear, the second with a " (1)" suffix. Album folders only grow: to rebuild
   them cleanly, delete the album folder and run again.
 
+PROFILES
+  The backup folder and the options live in a profile, in the same
+  configuration file as file-backup.py and drive-compare.py:
+  ~/.config/proton-backup/config.ini (another one with --config), section
+  [photo-backup <name>]. Create or change one with:
+
+      ./photo-backup.py --setup ssd
+
+  then back up with ./photo-backup.py ssd, or just ./photo-backup.py when
+  it's the only photo-backup profile. A folder path works too, with the
+  defaults. Command-line options override the profile; the per-run ones
+  (--import, --redownload-missing, --limit, --reuse-inventory,
+  --skip-failed, --dry-run) only exist on the command line.
+
 USAGE
-  ./photo-backup.py /path/to/backup/proton-photos
+  ./photo-backup.py --setup ssd
+  ./photo-backup.py                     # monthly, with the only profile
+  ./photo-backup.py --import ~/Downloads
+  ./photo-backup.py ssd --dry-run
   ./photo-backup.py /path/to/backup/proton-photos --albums --album-dir /path/to/backup/proton-albums
-  ./photo-backup.py /path/to/backup/proton-photos --import ~/Downloads
-  ./photo-backup.py /path/to/backup/proton-photos --dry-run
 
 SAFETY
   Never modifies or deletes anything on Proton. Locally it adds files, sets
@@ -81,24 +96,40 @@ DELETED_LOCALLY = "photos-deleted-locally.txt"
 WORK_DIRS = {"_reupload"}       # photo-redate.py's work folder
 
 
+SCRIPT = "photo-backup"
+HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
+
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Incremental backup of Proton Photos, by capture year, with albums.")
-    p.add_argument("dest", help="backup folder, e.g. /path/to/backup/proton-photos")
-    p.add_argument("--albums", action="store_true",
-                   help="also rebuild the albums as folders of hard links")
-    p.add_argument("--album-dir", default="album",
+        description="Incremental backup of Proton Photos, by capture year, with albums.",
+        epilog="Settings: ~/.config/proton-backup/config.ini (see config.example.ini). "
+               "Options given here override the profile.")
+    p.add_argument("target", nargs="?",
+                   help="a profile from the configuration file (optional when there's "
+                        "only one), or the backup folder")
+    p.add_argument("--setup", action="store_true",
+                   help="create or change the profile named by TARGET, asking questions")
+    p.add_argument("--config", default=protonlib.CONFIG_PATH,
+                   help="configuration file (default ~/.config/proton-backup/config.ini)")
+    g = p.add_argument_group("settings (override the profile)")
+    al = g.add_mutually_exclusive_group()
+    al.add_argument("--albums", dest="albums", action="store_const", const="yes",
+                    help="also rebuild the albums as folders of hard links")
+    al.add_argument("--no-albums", dest="albums", action="store_const", const="no",
+                    help="skip the albums this time")
+    g.add_argument("--album-dir",
                    help="where the album folders go: relative to the backup folder or "
                         "absolute (default: album)")
+    g.add_argument("--batch", type=int,
+                   help="photos per CLI call (default 5: bigger batches time out more)")
+    g.add_argument("--timeout", type=int,
+                   help="timeout per CLI call, in seconds (default 300)")
     p.add_argument("--import", dest="import_dir", default=None, metavar="DIR",
                    help="first add photos downloaded by hand into DIR (moved, matched by name)")
     p.add_argument("--redownload-missing", action="store_true",
                    help="download again photos deleted from the backup but still on Proton")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI, help="path to the CLI binary")
-    p.add_argument("--batch", type=int, default=5,
-                   help="photos per CLI call (default 5: bigger batches time out more)")
-    p.add_argument("--timeout", type=int, default=300,
-                   help="timeout per CLI call, in seconds (default 300)")
     p.add_argument("--limit", type=int, default=0,
                    help="download at most N photos and stop (0 = all)")
     p.add_argument("--reuse-inventory", action="store_true",
@@ -109,11 +140,61 @@ def parse_args():
     p.add_argument("--dry-run", action="store_true",
                    help="show what would be downloaded, changed and imported")
     a = p.parse_args()
-    a.dest = os.path.expanduser(a.dest)
-    a.album_base = os.path.join(a.dest, os.path.expanduser(a.album_dir))
+    a.config = os.path.expanduser(a.config)
     if a.import_dir:
         a.import_dir = os.path.expanduser(a.import_dir)
     return a
+
+
+def resolve_settings(a):
+    """Settings for this run: profile (or defaults), then command-line options.
+    Copies them onto `a` (a.dest, a.albums, a.album_base, a.batch, a.timeout)."""
+    cfg = protonlib.read_config(a.config)
+    name = protonlib.choose_profile(cfg, SCRIPT, a.target, a.config)
+    s = protonlib.load_settings(cfg, SCRIPT, name)
+    if name is None:
+        s["dest"] = a.target
+        where = "defaults and command line"
+    else:
+        where = f"profile [{protonlib.profile_section(SCRIPT, name)}] in {a.config}"
+        if not s["dest"]:
+            sys.exit(f"ERROR: {where} has no dest. Run: ./{SCRIPT}.py --setup {name}")
+    for k in ("albums", "album_dir", "batch", "timeout"):
+        v = getattr(a, k)
+        if v is not None:
+            s[k] = str(v)
+    protonlib.check_settings(s, where)
+
+    a.profile = name
+    a.where = where
+    a.dest = os.path.expanduser(s["dest"])
+    a.albums = s["albums"] == "yes"
+    a.album_dir = s["album_dir"]
+    a.album_base = os.path.join(a.dest, os.path.expanduser(s["album_dir"]))
+    a.batch, a.timeout = s["batch"], s["timeout"]
+    # a profile's backup folder must already exist: a missing one usually
+    # means the external disk isn't plugged in, and creating it would fill
+    # the internal disk instead
+    if name is not None and not os.path.isdir(a.dest):
+        sys.exit(f"ERROR: {a.dest} doesn't exist ({where}). Is the disk plugged in?")
+    return a
+
+
+def setup_questions(cur):
+    ask = protonlib.ask
+    new = {}
+    print("")
+    print(f"  {HELP['dest']}")
+    new["dest"] = protonlib.ask_existing_folder(
+        "dest", cur["dest"] or "/Volumes/MyBackupDisk/proton-photos")
+    for k in ("albums", "album_dir", "batch", "timeout"):
+        if k == "album_dir" and new["albums"] == "no":
+            continue
+        print("")
+        print(f"  {HELP[k]}")
+        new[k] = ask(k, cur[k], protonlib.SETTING_CHOICES.get(k),
+                     protonlib.SETTING_MINIMUM.get(k))
+    return new
 
 
 # --- Proton inventory --------------------------------------------------------
@@ -438,7 +519,8 @@ def download(a, todo, total, expected_sha):
                             append_state(a, [u])
                             recovered += 1
                         else:
-                            failed.append((u, (r2.stderr or "")[:120]))
+                            # one line per photo in the failed list
+                            failed.append((u, " ".join((r2.stderr or "").split())[:120]))
                     except subprocess.TimeoutExpired:
                         failed.append((u, "timeout"))
                 downloaded += recovered
@@ -547,11 +629,15 @@ def link_albums(a, albums, photo_map):
 
 def main():
     a = parse_args()
+    if a.setup:
+        return protonlib.run_setup(a.config, SCRIPT, a.target, setup_questions)
+    resolve_settings(a)
     os.makedirs(a.dest, exist_ok=True)
     print("")
     print(f"  Backup : {a.dest}")
     if a.albums:
         print(f"  Albums : {a.album_base}")
+    print(f"  From   : {a.where}")
     print("")
 
     inventory = read_timeline(a)

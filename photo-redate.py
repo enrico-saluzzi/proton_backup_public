@@ -55,13 +55,22 @@ LIMITS
   - The CLI exits 0 even when an upload does nothing: that's why the new
     photo is looked for on the timeline instead of trusting the exit code.
 
-USAGE
-  ./photo-redate.py /path/to/backup/proton-photos                      # plan
-  ./photo-redate.py /path/to/backup/proton-photos --exclude-file excluded.txt
-  ./photo-redate.py /path/to/backup/proton-photos --apply --limit 5    # try a few
-  ./photo-redate.py /path/to/backup/proton-photos --apply
+PROFILES
+  The backup folder comes from the photo-backup.py profile of the same name
+  ([photo-backup <name>] in ~/.config/proton-backup/config.ini, or --config):
+  ./photo-redate.py ssd works on its dest, and with a single photo-backup
+  profile ./photo-redate.py is enough. An optional [photo-redate <name>]
+  section holds this script's own settings (exclude, exclude_file, wait,
+  timeout); create it with ./photo-redate.py --setup ssd. A folder path works
+  too. Command-line options override the profile.
 
-  Afterwards, run photo-backup.py --albums again to bring the backup in line.
+USAGE
+  ./photo-redate.py                                    # plan, with the only profile
+  ./photo-redate.py --apply --limit 5                  # try a few
+  ./photo-redate.py --apply
+  ./photo-redate.py /path/to/backup/proton-photos --exclude-file excluded.txt
+
+  Afterwards, run photo-backup.py again to bring the backup in line.
 """
 
 import argparse
@@ -84,14 +93,30 @@ STATE = "reupload-state.json"
 VIDEO_EXT = (".mov", ".mp4", ".m4v", ".avi", ".3gp")
 
 
+SCRIPT = "photo-redate"
+HELP = {k: h for k, _, h in protonlib.PROFILE_SETTINGS[SCRIPT]}
+
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Fix the date of scanned photos on Proton, using the albums.")
-    p.add_argument("dest", help="photo backup folder")
-    p.add_argument("--exclude", default="",
-                   help="album names to leave alone, comma-separated")
-    p.add_argument("--exclude-file", default=None,
+        description="Fix the date of scanned photos on Proton, using the albums.",
+        epilog="Settings: ~/.config/proton-backup/config.ini (see config.example.ini). "
+               "The backup folder comes from the photo-backup profile of the same name.")
+    p.add_argument("target", nargs="?",
+                   help="a photo-backup profile (optional when there's only one), "
+                        "or the photo backup folder")
+    p.add_argument("--setup", action="store_true",
+                   help="create or change this script's settings for the profile TARGET")
+    p.add_argument("--config", default=protonlib.CONFIG_PATH,
+                   help="configuration file (default ~/.config/proton-backup/config.ini)")
+    g = p.add_argument_group("settings (override the profile)")
+    g.add_argument("--exclude", help="album names to leave alone, comma-separated")
+    g.add_argument("--exclude-file",
                    help="file with one album name per line (# for comments)")
+    g.add_argument("--wait", type=int,
+                   help="with --apply: seconds to wait before looking for the uploads "
+                        "(default 20)")
+    g.add_argument("--timeout", type=int, help="timeout per CLI call, in seconds (default 600)")
     p.add_argument("--max-print", type=int, default=40)
     p.add_argument("--apply", action="store_true",
                    help="apply the saved plan on Proton (re-upload, re-add, trash)")
@@ -100,23 +125,71 @@ def parse_args():
                    help="with --apply: try videos too (Proton ignores their dates)")
     p.add_argument("--skip-rename", action="store_true",
                    help="with --apply: don't restore the original name on the new copy")
-    p.add_argument("--wait", type=int, default=20,
-                   help="with --apply: seconds to wait before looking for the uploads "
-                        "(default 20)")
     p.add_argument("--work", default=None,
                    help="with --apply: work folder (default: _reupload in the backup folder)")
     p.add_argument("--exiftool", default="exiftool")
     p.add_argument("--cli", default=protonlib.DEFAULT_CLI)
-    p.add_argument("--timeout", type=int, default=600)
     a = p.parse_args()
-    a.dest = os.path.expanduser(a.dest)
+    a.config = os.path.expanduser(a.config)
+    return a
+
+
+def resolve_settings(a):
+    """Settings for this run, copied onto `a` (a.dest, a.excluded, a.wait,
+    a.timeout, a.work)."""
+    cfg = protonlib.read_config(a.config)
+    name = protonlib.choose_profile(cfg, SCRIPT, a.target, a.config)
+    s = protonlib.load_settings(cfg, SCRIPT, name)
+    if name is None:
+        s["dest"] = a.target
+        where = "defaults and command line"
+    else:
+        where = (f"profile [photo-backup {name}]"
+                 + (f" and [{SCRIPT} {name}]" if cfg.has_section(f"{SCRIPT} {name}") else "")
+                 + f" in {a.config}")
+        if not s["dest"]:
+            sys.exit(f"ERROR: [photo-backup {name}] in {a.config} has no dest. "
+                     f"Run: ./photo-backup.py --setup {name}")
+    for k in ("exclude", "exclude_file", "wait", "timeout"):
+        v = getattr(a, k)
+        if v is not None:
+            s[k] = str(v)
+    protonlib.check_settings(s, where)
+
+    a.profile, a.where = name, where
+    a.dest = os.path.expanduser(s["dest"])
+    if not os.path.isdir(a.dest):
+        sys.exit(f"ERROR: {a.dest} doesn't exist ({where}). Is the disk plugged in?")
+    a.wait, a.timeout = s["wait"], s["timeout"]
     a.work = os.path.expanduser(a.work) if a.work else os.path.join(a.dest, "_reupload")
-    excluded = set(x.strip() for x in a.exclude.split(",") if x.strip())
-    if a.exclude_file and os.path.exists(os.path.expanduser(a.exclude_file)):
-        with open(os.path.expanduser(a.exclude_file), encoding="utf-8") as f:
+    excluded = set(x.strip() for x in s["exclude"].split(",") if x.strip())
+    if s["exclude_file"]:
+        path = os.path.expanduser(s["exclude_file"])
+        if not os.path.isfile(path):
+            sys.exit(f"ERROR: exclude_file {path} doesn't exist or isn't a file ({where})")
+        with open(path, encoding="utf-8") as f:
             excluded |= set(l.strip() for l in f if l.strip() and not l.startswith("#"))
     a.excluded = excluded
     return a
+
+
+def setup_questions(cur):
+    new = {}
+    for k in ("exclude", "exclude_file", "wait", "timeout"):
+        print("")
+        print(f"  {HELP[k]}")
+        if k in ("exclude", "exclude_file"):
+            while True:
+                v = protonlib.ask(k, cur[k] or "none")
+                v = "" if v == "none" else v
+                if k == "exclude" or not v or os.path.isfile(os.path.expanduser(v)):
+                    break
+                print(f"    {v} doesn't exist")
+            new[k] = v
+            continue
+        new[k] = protonlib.ask(k, cur[k], minimum=protonlib.SETTING_MINIMUM.get(k))
+    return new
+
 
 
 def load_json(a, name, required_by):
@@ -431,12 +504,17 @@ def apply_plan(a):
             print(f"    {u[-12:]}  {v.get('phase')}  {v.get('error', '')[:70]}")
     print("")
     print("  The old versions are in Proton's trash, recoverable.")
-    print("  Now bring the backup in line:  ./photo-backup.py DEST --albums ...")
+    print("  Now bring the backup in line:  ./photo-backup.py"
+          + (f" {a.dest} --albums" if a.profile is None else ""))
     return 0
 
 
 def main():
     a = parse_args()
+    if a.setup:
+        return protonlib.run_setup(a.config, SCRIPT, a.target, setup_questions)
+    resolve_settings(a)
+    print(f"  Backup : {a.dest}   ({a.where})")
     return apply_plan(a) if a.apply else make_plan(a)
 
 
