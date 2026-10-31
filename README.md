@@ -201,7 +201,7 @@ What it does with each file in the folder:
 | same path on Drive, same content (sha1) | identical, counted |
 | same path, different content | decided by `winner`: `proton` keeps Drive's (default), `folder` copies the folder's over it, `newer` picks the most recently modified, `ask` lists it |
 | not at that path, but found elsewhere on Drive | moved or renamed, counted (`moved = list` to see them) |
-| listed in the ignore file | deleted from Drive on purpose, counted |
+| listed in the ignore file | counted: deleted from Drive on purpose, or a different version where Drive's is kept |
 | system files, content of macOS packages | counted (Drive stores a package as one `.pkgf` file) |
 | nowhere on Drive | **needs a decision**, with a note if something with that name is in the Proton trash |
 
@@ -216,13 +216,16 @@ appends the full lists to it.
   when the placeholder reports it): the report says how many were matched by
   name only. Make the folder **available offline** for a check by content.
 - The **ignore file** (`~/.config/proton-backup/ignore-<profile>.txt`) lists
-  paths you deleted from Drive on purpose: one per line, a folder covers
-  everything under it, `*` and `?` work as in the shell.
+  paths never reported again: deleted from Drive on purpose, or a different
+  version where Drive's is kept. One per line, a folder covers everything
+  under it, `*` and `?` work as in the shell.
 - The **Proton trash** is read only as a hint: the CLI can't list what's
   inside a trashed folder, and the trash is emptied after a while.
 - If at most `review_max` files (default 20) need a decision and you're in a
-  terminal, the script asks for each one: **c** copy to Drive, **i** ignore
-  forever (added to the ignore file), **s** skip, **q** stop asking. With more
+  terminal, the script asks for each one: **c** copy to Drive (over Drive's
+  version, for a different one), **i** ignore forever (added to the ignore
+  file: deleted on purpose, or keep Drive's version), **s** skip, **q** stop
+  asking. With more
   files there's only the report: a review of hundreds of files never ends.
 - If the content landed in a subfolder on Drive (check with
   `proton-drive filesystem list /my-files`), set `proton_root` (or `--root`)

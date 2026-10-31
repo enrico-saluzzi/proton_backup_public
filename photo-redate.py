@@ -333,7 +333,7 @@ def apply_plan(a):
 
     # phase 0: the timeline BEFORE the uploads, to recognize new uids by difference
     print("  PHASE 0: reading the timeline before uploading")
-    r = cli(a, ["photo", "timeline", "-j"], timeout=3600)
+    r = protonlib.run_timeline(a.cli, details=False)
     if r.returncode != 0:
         sys.exit(f"ERROR in the initial read: {(r.stderr or r.stdout)[:200]}")
     uids_before = {x.get("nodeUid") or x.get("uid") for x in json.loads(r.stdout)}
@@ -397,7 +397,7 @@ def apply_plan(a):
         print(f"  waiting {a.wait}s for Proton to index the uploads...")
         time.sleep(a.wait)
     print("  PHASE 3: reading the timeline again to find the new photos")
-    r = cli(a, ["photo", "timeline", "-d", "-j"], timeout=3600)
+    r = protonlib.run_timeline(a.cli, expected=len(uids_before))
     if r.returncode != 0:
         print("  ERROR while re-reading: the photos are uploaded but not matched.")
         print("  Run --apply again: it will resume from here.")

@@ -42,8 +42,8 @@ WHAT IT DOES WITH EACH FILE IN THE FOLDER
      the file is on disk; by name and size, or by name alone, when it's an
      online-only placeholder (0 bytes, no content to hash). If found, it was
      moved or renamed on Proton.
-  4. Listed in the ignore file (paths deleted from Proton on purpose): only
-     counted.
+  4. Listed in the ignore file: only counted. A path only in the folder was
+     deleted from Proton on purpose; a different version keeps Proton's.
   5. System files and the content of macOS packages (.pages, .numbers, ...;
      Proton stores a package as a single .pkgf file): only counted.
   6. Anything else is in the folder and nowhere on Proton: a decision is
@@ -345,7 +345,8 @@ class Result:
         self.replace = []         # different version, the folder's wins: copy over
         self.decide_diff = []     # (rel, reason)
         self.moved = []           # (rel, proton path, how)
-        self.ignored = []
+        self.ignored = []         # only here, in the ignore file: deleted on purpose
+        self.ignored_diff = []    # different version, in the ignore file: Proton's kept
         self.noise = {}           # category -> [rel]
         self.decide_missing = []  # rel
         self.copy_new = []        # missing files going in the copy script
@@ -372,7 +373,7 @@ def compare(s, local, remote, include_online):
 
     def to_decide_diff(rel, reason):
         if is_ignored(rel, patterns):
-            res.ignored.append(rel)
+            res.ignored_diff.append(rel)
         else:
             res.decide_diff.append((rel, reason))
 
@@ -496,10 +497,16 @@ def review(s, res, local, remote):
     the ignore file."""
     items = [("missing", rel, "") for rel in res.decide_missing] + \
             [("diff", rel, why) for rel, why in res.decide_diff]
+    diff = {rel for rel, _ in res.decide_diff}
     name = s["name"]
     print("")
     print(f"{len(items)} files need a decision. For each one:")
-    print("  c = copy to Proton   i = ignore forever (deleted from Proton on purpose)")
+    if res.decide_missing:
+        print(f"  only in {name}: c = copy to Proton   "
+              "i = ignore forever (deleted from Proton on purpose)")
+    if res.decide_diff:
+        print("  different content: c = copy over Proton's   "
+              "i = ignore forever (keep Proton's version)")
     print("  s = skip, decide later   q = stop asking")
     to_ignore, copy_new, replace = [], [], []
     for n, (kind, rel, why) in enumerate(items, 1):
@@ -532,7 +539,8 @@ def review(s, res, local, remote):
                           if r not in to_ignore and r not in copy_new]
     res.decide_diff = [(r, w) for r, w in res.decide_diff
                        if r not in to_ignore and r not in replace]
-    res.ignored.extend(to_ignore)
+    res.ignored.extend(r for r in to_ignore if r not in diff)
+    res.ignored_diff.extend(r for r in to_ignore if r in diff)
     res.copy_new.extend(copy_new)
     res.replace.extend(replace)
     return to_ignore
@@ -543,9 +551,10 @@ def append_ignore(path, rels):
     new = not os.path.exists(path)
     with open(path, "a", encoding="utf-8") as f:
         if new:
-            f.write("# Paths deleted from Proton on purpose: drive-compare.py never\n"
-                    "# reports them again. One per line; a folder covers everything\n"
-                    "# under it; * and ? work as in the shell.\n")
+            f.write("# Paths drive-compare.py never reports again: deleted from Proton\n"
+                    "# on purpose, or a different version where Proton's is kept.\n"
+                    "# One per line; a folder covers everything under it; * and ?\n"
+                    "# work as in the shell.\n")
         f.write(f"\n# added by the review on {protonlib.generated_on()}\n")
         for rel in rels:
             f.write(rel + "\n")
@@ -638,6 +647,7 @@ def render_report(s, res, local, remote, stamp, copy_path, details, limit=None):
         ("  of which matched by name only", by_name_only),
         ("different version, Proton's kept", len(res.proton_kept)),
         (f"different version, {name}'s copied over", len(res.replace)),
+        ("different version, Proton's kept (ignore file)", len(res.ignored_diff)),
         ("deleted on purpose (ignore file)", len(res.ignored)),
         ("only on Proton", len(res.proton_only)),
         (f"online-only in {name}, not verified", len(res.online)),
@@ -661,6 +671,7 @@ def render_report(s, res, local, remote, stamp, copy_path, details, limit=None):
             ("Moved or renamed on Proton", [f"{a} -> {b}   [{c}]" for a, b, c in res.moved]),
             ("Different version, Proton's kept", res.proton_kept),
             (f"Different version, {name}'s copied over", res.replace),
+            ("Different version, Proton's kept (ignore file)", res.ignored_diff),
             ("Deleted on purpose (ignore file)", res.ignored),
             ("Only on Proton", res.proton_only),
             (f"Online-only in {name}, not verified", res.online),

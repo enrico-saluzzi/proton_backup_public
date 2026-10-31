@@ -866,5 +866,77 @@ class SuggestReuseTest(ScriptTestCase):
         self.assertEqual(self.hint(path), "")
 
 
+
+SLOW_TIMELINE = """#!/usr/bin/env python3
+import sys, time
+time.sleep(0.3)                     # listing: nothing printed yet
+print("[", flush=True)
+for i in range(4):
+    print(('{"uid": "u%d"},' if i < 3 else '{"uid": "u%d"}') % i, flush=True)
+    time.sleep(0.15)
+print("]")
+sys.stderr.write("a warning\\n")
+sys.exit(int(sys.argv[-1] == "-j" and "-d" not in sys.argv))
+"""
+
+
+class RunTimelineTest(ScriptTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.cli = self.write(os.path.join(self.tmp, "bin", "slow-cli"), SLOW_TIMELINE)
+        os.chmod(self.cli, 0o755)
+        self.plib.TIMELINE_TICK = 0.1
+
+    def run_timeline(self, **kw):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            r = self.plib.run_timeline(self.cli, **kw)
+        return r, err.getvalue()
+
+    def test_output_is_returned_like_run_cli(self):
+        r, _ = self.run_timeline()
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual([x["uid"] for x in json.loads(r.stdout)], ["u0", "u1", "u2", "u3"])
+        self.assertEqual(r.stderr, "a warning\n")
+        self.assertEqual(r.args[1:], ["photo", "timeline", "-d", "-j"])
+
+    def test_without_details_there_is_no_d(self):
+        r, _ = self.run_timeline(details=False)
+        self.assertEqual(r.args[1:], ["photo", "timeline", "-j"])
+        self.assertEqual(r.returncode, 1)       # the fake fails without -d
+
+    def test_progress_shows_the_wait_then_the_photos_received(self):
+        _, err = self.run_timeline()
+        self.assertIn("nothing received yet", err)
+        self.assertRegex(err, r"received \d photos")
+        self.assertTrue(err.endswith("\n"))
+
+    def test_progress_has_a_percentage_when_the_count_is_known(self):
+        _, err = self.run_timeline(expected=4)
+        self.assertRegex(err, r"received \d of about 4 photos \(\d+%\)")
+
+    def test_timeout_kills_the_cli(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_timeline(timeout=0.1)
+
+    def test_missing_cli_raises_file_not_found(self):
+        with self.assertRaises(FileNotFoundError):
+            self.plib.run_timeline(os.path.join(self.tmp, "nope"))
+
+
+class JsonCountTest(ScriptTestCase):
+
+    def test_counts_the_items_or_returns_0(self):
+        path = os.path.join(self.tmp, "t.json")
+        self.assertEqual(self.plib.json_count(path), 0)          # missing
+        self.write(path, "[1, 2, 3]")
+        self.assertEqual(self.plib.json_count(path), 3)
+        self.write(path, "[1, 2")
+        self.assertEqual(self.plib.json_count(path), 0)          # truncated
+        self.write(path, "7")
+        self.assertEqual(self.plib.json_count(path), 0)          # not a list
+
+
 if __name__ == "__main__":
     unittest.main()

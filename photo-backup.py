@@ -288,7 +288,7 @@ def read_timeline(a):
     print("  Reading the timeline from Proton...")
     t0 = time.time()
     try:
-        r = protonlib.run_cli(a.cli, ["photo", "timeline", "-d", "-j"], timeout=3600)
+        r = protonlib.run_timeline(a.cli, expected=protonlib.json_count(path))
     except FileNotFoundError:
         sys.exit(f"ERROR: '{a.cli}' not found. Use --cli to point at it.")
     except subprocess.TimeoutExpired:

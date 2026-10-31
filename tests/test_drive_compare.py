@@ -747,7 +747,8 @@ class CompareTest(DriveCompareTestCase):
         self.here("Docs/cv.pdf", "mine")
         self.proton("Docs/cv.pdf", "theirs")
         res = self.run_compare(winner="ask")
-        self.assertEqual(res.ignored, ["Docs/cv.pdf"])
+        self.assertEqual(res.ignored_diff, ["Docs/cv.pdf"])
+        self.assertEqual(res.ignored, [])
         self.assertEqual(res.decide_diff, [])
 
     def test_ignore_applies_to_same_date_ties_with_winner_newer(self):
@@ -755,7 +756,7 @@ class CompareTest(DriveCompareTestCase):
         self.here("tie.txt", "mine", mtime=self.T0)
         self.proton("tie.txt", "theirs", mtime=self.T0)
         res = self.run_compare(winner="newer")
-        self.assertEqual(res.ignored, ["tie.txt"])
+        self.assertEqual(res.ignored_diff, ["tie.txt"])
         self.assertEqual(res.decide_diff, [])
 
     # noise
@@ -954,11 +955,25 @@ class ReviewTest(DriveCompareTestCase):
         self.assertEqual(res.copy_new, ["m1.txt"])
         self.assertEqual(res.replace, ["d1.txt"])
         self.assertEqual(ignored, ["m2.txt", "d2.txt"])
-        self.assertEqual(sorted(res.ignored), ["d2.txt", "m2.txt"])
+        self.assertEqual(res.ignored, ["m2.txt"])
+        self.assertEqual(res.ignored_diff, ["d2.txt"])
         self.assertEqual(res.decide_missing, ["m3.txt"])
         self.assertEqual(res.decide_diff, [])
         self.assertIn("in the Proton trash since 2026-10-12", out)
         self.assertIn("[5/5] d2.txt", out)
+
+    def test_header_explains_i_for_each_kind(self):
+        _, _, out = self.run_review(["q"])
+        self.assertIn("only in dropbox: c = copy to Proton", out)
+        self.assertIn("deleted from Proton on purpose", out)
+        self.assertIn("i = ignore forever (keep Proton's version)", out)
+
+    def test_header_shows_only_the_kinds_present(self):
+        res = self.result()
+        res.decide_missing = []
+        _, _, out = self.run_review(["q"], res)
+        self.assertNotIn("deleted from Proton on purpose", out)
+        self.assertIn("keep Proton's version", out)
 
     def test_answers_are_case_and_space_insensitive(self):
         res, ignored, _ = self.run_review([" C ", "I", "s", "S", "s"])
@@ -999,7 +1014,7 @@ class ReviewTest(DriveCompareTestCase):
         self.dc.append_ignore(path, ["Old/a.txt"])
         self.dc.append_ignore(path, ["Old/b.txt", "Other"])
         text = read(path)
-        self.assertEqual(text.count("Paths deleted from Proton on purpose"), 1)
+        self.assertEqual(text.count("Paths drive-compare.py never reports again"), 1)
         self.assertEqual(text.count("# added by the review on"), 2)
         self.assertEqual(self.dc.load_ignore(path), ["old/a.txt", "old/b.txt", "other"])
 
