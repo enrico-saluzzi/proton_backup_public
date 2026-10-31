@@ -168,30 +168,6 @@ the backup made by `photo-backup.py`, so they take its folder from the
 sections only hold their own settings and are optional. `photo-prune.py` has
 no `--setup`: its one setting, `timeout`, is edited by hand.
 
-```mermaid
-flowchart LR
-    subgraph cfg ["~/.config/proton-backup/config.ini"]
-        DEF["[DEFAULT]<br/>shared by every profile"]
-        DC["[drive-compare dropbox]"]
-        FB["[file-backup ssd]"]
-        PB["[photo-backup ssd]<br/>dest, albums, ..."]
-        PC["[photo-compare camera]"]
-        PP["[photo-prune ssd]<br/>optional"]
-        PR["[photo-redate ssd]<br/>optional"]
-    end
-    dc(["drive-compare.py"]) <--> DC
-    fb(["file-backup.py"]) <--> FB
-    pb(["photo-backup.py"]) <--> PB
-    pc(["photo-compare.py"]) <--> PC
-    pp(["photo-prune.py"]) --> PP
-    pr(["photo-redate.py"]) <--> PR
-    pp -.->|dest| PB
-    pr -.->|dest| PB
-```
-
-A double arrow means the script reads its profile and `--setup` writes it. A
-single arrow means it only reads it. A dotted arrow from a script means the
-backup folder comes from the `photo-backup` profile.
 
 **What each script can be told.** The defaults are in brackets.
 
