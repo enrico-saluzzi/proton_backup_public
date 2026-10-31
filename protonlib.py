@@ -99,6 +99,82 @@ def run_cli(cli, cmd, timeout, capture=True):
                           stdin=subprocess.DEVNULL, timeout=timeout)
 
 
+TIMELINE_TICK = 2     # seconds between progress lines while reading the timeline
+
+
+def run_timeline(cli, details=True, timeout=3600, expected=0):
+    """`photo timeline [-d] -j`, like run_cli but with progress on stderr.
+
+    The CLI says nothing while it lists the timeline, then prints one photo
+    per line: the lines are counted, against `expected` (the photos read last
+    time; 0 = unknown) for a percentage.
+    """
+    cmd = [cli, "photo", "timeline"] + (["-d"] if details else []) + ["-j"]
+    out, err, lines = [], [], [0]
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          stdin=subprocess.DEVNULL) as p:
+        _follow_timeline(p, out, err, lines, timeout, expected)
+    return subprocess.CompletedProcess(cmd, p.returncode,
+                                       b"".join(out).decode("utf-8", "replace"),
+                                       b"".join(err).decode("utf-8", "replace"))
+
+
+def _follow_timeline(p, out, err, lines, timeout, expected):
+
+    def read_out():
+        for chunk in iter(lambda: p.stdout.read1(1 << 16), b""):
+            out.append(chunk)
+            lines[0] += chunk.count(b"\n")
+
+    readers = [threading.Thread(target=read_out, daemon=True),
+               threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)]
+    for t in readers:
+        t.start()
+    stop, shown = threading.Event(), []
+
+    def progress():
+        t0 = time.time()
+        while not stop.wait(TIMELINE_TICK):
+            n, secs = max(0, lines[0] - 1), int(time.time() - t0)   # line 1 is "["
+            if not n:
+                msg = f"Proton is listing the photos, nothing received yet | {secs}s"
+            elif expected:
+                msg = (f"received {n} of about {expected} photos "
+                       f"({min(99, n * 100 // expected)}%) | {secs}s")
+            else:
+                msg = f"received {n} photos | {secs}s"
+            sys.stderr.write(f"\r  {msg}   ")
+            sys.stderr.flush()
+            shown.append(True)
+
+    shower = threading.Thread(target=progress, daemon=True)
+    shower.start()
+    killed = False
+    try:
+        p.wait(timeout)
+    except BaseException:           # timeout, Ctrl-C
+        killed = True
+        p.kill()
+        p.wait()
+        raise
+    finally:
+        stop.set()
+        shower.join()
+        if shown:
+            sys.stderr.write("\n")
+        for t in readers:
+            t.join(5 if killed else None)   # a killed CLI's children may hold the pipe
+
+
+def json_count(path):
+    """How many items the JSON list in `path` holds; 0 if it can't be read."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return len(json.load(f))
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
 # Upload scripts are generated, never run directly by these tools: the user
 # reviews them first. They must work with the bash 3.2 shipped with macOS
 # (no `set -u` with arrays, no associative arrays).
@@ -598,7 +674,8 @@ PROFILE_SETTINGS = {
          "ask file by file at the end when at most this many need a decision "
          "(0 = never)"),
         ("ignore_file", "",
-         "paths deleted from Proton on purpose, one per line, never reported again "
+         "paths never reported again, one per line: deleted from Proton on purpose, "
+         "or a different version where Proton's is kept "
          "(empty = ~/.config/proton-backup/ignore-<profile>.txt)"),
         ("proton_folder", "",
          "the local folder synced by the Proton Drive app matching proton_root "
