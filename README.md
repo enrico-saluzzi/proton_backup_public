@@ -74,15 +74,8 @@ on Proton since. The two scripts share the scan, so only one can scan a given
 folder at a time: the second one stops and says to wait and then use
 `--reuse-scan`.
 
-Both read their choices from **profiles** in one configuration file, shared
-with `photo-backup.py`: `~/.config/proton-backup/config.ini` (another one with
-`--config`), a section per profile, `[file-backup ssd]`,
-`[drive-compare dropbox]`, `[photo-backup ssd]`, with `[DEFAULT]` for what
-they share. `--setup NAME` creates or changes a profile by asking
-one question at a time; [`config.example.ini`](config.example.ini) documents
-every setting. With a single profile, the script name alone is enough.
-Options on the command line override the profile, and a folder path still
-works instead of a profile name.
+Both read their choices from a **profile** in `config.ini`, like every other
+script: see [Config.ini](#configini).
 
 ### Photos (Proton Photos)
 
@@ -93,13 +86,10 @@ works instead of a profile name.
 | delete photos by browsing the backup, then trash them on Proton too | `photo-prune.py` |
 | fix the date of scanned prints that sit in the wrong year | `photo-redate.py`, then `--apply` |
 
-The photo scripts use profiles too, in the same configuration file:
-`[photo-backup ssd]` (the backup folder, the albums) and
-`[photo-compare camera]` (the folder to check). `photo-prune.py` and
-`photo-redate.py` work on the backup folder of the `photo-backup` profile
-with the same name, so it's written once: with a single profile, no name is
-needed at all. Their own sections, `[photo-redate ssd]` for instance with the
-albums to leave alone, are optional.
+The photo scripts use profiles too, in the same file: `[photo-backup ssd]`
+(the backup folder, the albums) and `[photo-compare camera]` (the folder to
+check). `photo-prune.py` and `photo-redate.py` work on the backup of the
+`photo-backup` profile with the same name: see [Config.ini](#configini).
 
 Like the Drive scan, what the photo scripts read from Proton is saved and
 reusable with the same option, `--reuse-scan`: the timeline and the album
@@ -113,6 +103,128 @@ path: it only exists through the CLI's `photo` and `album` commands, which is
 what these scripts use. In the backup, photos are matched to local files by
 **content** (sha1), not by name: the CLI renames duplicates, and identical
 content can exist under several uids.
+
+### Config.ini
+
+All six scripts read their settings from one file,
+`~/.config/proton-backup/config.ini` (another one with `--config`).
+[`config.example.ini`](config.example.ini) is a complete example, with every
+setting explained.
+
+**Profiles.** The file has one section per profile, named
+`[<script> <profile>]`. The profile name is yours: it usually names a disk or
+a folder (`ssd`, `dropbox`, `camera`). One script can have several profiles,
+e.g. `[drive-compare dropbox]` and `[drive-compare disk]` for two folders to
+check:
+
+```bash
+./drive-compare.py dropbox     # the [drive-compare dropbox] profile
+./drive-compare.py             # enough when drive-compare has a single profile
+./drive-compare.py ~/Dropbox   # a folder instead of a profile: the defaults apply
+```
+
+A profile only needs the settings that differ from the defaults:
+
+```ini
+[DEFAULT]
+; shared by every profile
+proton_root = /my-files
+
+[file-backup ssd]
+dest = /Volumes/MyBackupDisk/proton-files
+
+[photo-backup ssd]
+dest = /Volumes/MyBackupDisk/proton-photos
+albums = yes
+
+[photo-compare camera]
+folder = ~/Dropbox/Camera Uploads
+tz = Europe/Rome
+upload_script = yes
+```
+
+**Where each value comes from**, the later winning:
+
+1. the script's default;
+2. `[DEFAULT]`, shared by every profile;
+3. the profile's section;
+4. an option on the command line (`--winner ask`, `--tz Europe/Rome`, ...), for
+   that run only: it's never saved.
+
+**`--setup` writes the file.** `./<script>.py --setup NAME` creates the
+profile `[<script> NAME]`, or changes it if it exists. It asks one question at
+a time, with the current value in brackets: Enter keeps it, Ctrl-C quits
+without writing anything. Then it writes the whole file again, with every
+setting preceded by its explanation. Comments you added by hand are replaced
+by those explanations. If `config.ini` is a symlink (e.g. to a private
+repository), it stays one. You can also edit the file by hand: when a script
+starts it checks the choices (`yes`/`no`, ...) and the numbers, and stops on
+a value it doesn't accept.
+
+**One backup, three scripts.** `photo-prune.py` and `photo-redate.py` work on
+the backup made by `photo-backup.py`, so they take its folder from the
+`photo-backup` profile with the same name: `./photo-prune.py ssd` uses the
+`dest` of `[photo-backup ssd]`. The folder is written in one place. Their own
+sections only hold their own settings and are optional. `photo-prune.py` has
+no `--setup`: its one setting, `timeout`, is edited by hand.
+
+```mermaid
+flowchart LR
+    subgraph cfg ["~/.config/proton-backup/config.ini"]
+        DEF["[DEFAULT]<br/>shared by every profile"]
+        DC["[drive-compare dropbox]"]
+        FB["[file-backup ssd]"]
+        PB["[photo-backup ssd]<br/>dest, albums, ..."]
+        PC["[photo-compare camera]"]
+        PP["[photo-prune ssd]<br/>optional"]
+        PR["[photo-redate ssd]<br/>optional"]
+    end
+    dc(["drive-compare.py"]) <--> DC
+    fb(["file-backup.py"]) <--> FB
+    pb(["photo-backup.py"]) <--> PB
+    pc(["photo-compare.py"]) <--> PC
+    pp(["photo-prune.py"]) --> PP
+    pr(["photo-redate.py"]) <--> PR
+    pp -.->|dest| PB
+    pr -.->|dest| PB
+```
+
+A double arrow means the script reads its profile and `--setup` writes it. A
+single arrow means it only reads it. A dotted arrow from a script means the
+backup folder comes from the `photo-backup` profile.
+
+**What each script can be told.** The defaults are in brackets.
+
+| Section | Setting | What it decides |
+|---|---|---|
+| `[DEFAULT]` | `proton_root` (`/my-files`) | the Proton folder to work on; `/my-files` is the whole Drive |
+| `[drive-compare <name>]` | `folder` | the folder to compare with Drive (e.g. `~/Dropbox`, or a copy on a disk) |
+| | `exclude` | top-level subfolders to skip, comma-separated, exact names |
+| | `compare_by` (`content`) | `content`: identical files verified by sha1 · `size`: trust name and size |
+| | `winner` (`proton`) | same file, different content: `proton` keeps Drive's · `folder` copies the folder's over it · `newer` picks the most recently modified · `ask` lists it among the decisions |
+| | `moved`, `proton_only` (`hide`) | files moved on Drive, files only on Drive: `hide` counts them · `list` shows them in the report |
+| | `copy_script` (`no`) | `yes`: the copy script also copies the files missing on Drive |
+| | `review_max` (`20`) | asks file by file when at most this many need a decision (`0` = never) |
+| | `ignore_file` | paths never reported again (default `~/.config/proton-backup/ignore-<profile>.txt`) |
+| | `proton_folder` | the folder synced by the Proton Drive app (found automatically) |
+| `[file-backup <name>]` | `dest` | the backup folder, e.g. on an external disk |
+| | `verify` (`yes`) | recompute the sha1 of every local file: catches a corrupted file of the same size |
+| | `cleanup` (`yes`) | the backup follows Drive: what was deleted on Drive is moved to `deleted_dir` |
+| | `deleted_dir` | where cleanup moves it, one folder per date (default `deleted/files` next to the backup) |
+| | `workers` (`3`), `batch` (`20`), `timeout` (`1800`) | parallel calls while scanning, files per download, seconds per download |
+| `[photo-backup <name>]` | `dest` | the photo backup folder, one subfolder per capture year |
+| | `albums` (`no`), `album_dir` (`album`) | `yes`: rebuild every album as a folder of hard links, in `album_dir` (same disk) |
+| | `cleanup` (`yes`) | the backup follows Photos: deleted photos to `deleted_dir`, extra copies deleted, album folders updated |
+| | `deleted_dir` | where cleanup moves them (default `deleted/photos` next to the backup) |
+| | `batch` (`5`), `timeout` (`300`) | photos per CLI call, seconds per call |
+| `[photo-compare <name>]` | `folder` | the local photo folder to check, with its subfolders |
+| | `tz` | time zone of capture times written without one, e.g. `Europe/Rome` (this Mac's) |
+| | `tolerance` (`1`) | seconds of tolerance on capture times |
+| | `exif` (`yes`) | read the date with `exiftool` when the file name has none |
+| | `upload_script` (`no`), `batch` (`20`) | `yes`: also write a script uploading the missing photos, `batch` per command |
+| `[photo-prune <name>]` | `timeout` (`120`) | seconds per CLI call; the backup comes from `[photo-backup <name>]` |
+| `[photo-redate <name>]` | `exclude`, `exclude_file` | albums to leave alone: comma-separated, or one per line in a file |
+| | `wait` (`20`), `timeout` (`600`) | with `--apply`: seconds before looking for the re-uploaded photos; seconds per call |
 
 ---
 
@@ -385,7 +497,7 @@ plan you reviewed, and is resumable.
 
 | File | Written by | Used by |
 |---|---|---|
-| `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of either script, or you | all scripts |
+| `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of any script, or you | all scripts |
 | `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
