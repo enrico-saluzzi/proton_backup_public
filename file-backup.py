@@ -350,13 +350,12 @@ def main():
                 h = protonlib.sha1_of(local)
                 verified += 1
                 if verified % 100 == 0:
-                    sys.stderr.write(f"\r  verifying sha1: {verified} files...")
+                    protonlib.status(f"verifying sha1: {verified} files...")
                 if h != sha1:
                     different.append((rel, size, lsize))
                     continue
         ok_files += 1
-    if a.verify:
-        sys.stderr.write("\r" + " " * 40 + "\r")
+    protonlib.status_end(keep=False)
 
     # local files that no longer exist on the remote
     on_disk = backup_files(a.dest, a.deleted_dir)
@@ -455,11 +454,10 @@ def download(a, remote, to_download, bytes_to_download):
                 for rel in batch:
                     failed.append((rel, err))
                 sys.stderr.write(f"\n  batch failed in {sub or '/'}: {err}\n")
-            el = int(time.time() - t0)
-            sys.stderr.write(f"\r  {done}/{len(to_download)} files | {el}s      ")
-            sys.stderr.flush()
+            protonlib.status(f"{done}/{len(to_download)} files | "
+                             f"{int(time.time() - t0)}s", done + len(failed), len(to_download))
 
-    sys.stderr.write("\n")
+    protonlib.status_end()
     print("")
     print(f"  Downloaded : {done}")
     print(f"  Failed     : {len(failed)}")

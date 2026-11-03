@@ -382,9 +382,8 @@ def apply_plan(a):
         except Exception as e:
             rec.update(phase="error", error=str(e)[:200])
             save_state(a, st)
-        sys.stderr.write(f"\r  {i}/{len(todo)} prepared and uploaded    ")
-        sys.stderr.flush()
-    sys.stderr.write("\n")
+        protonlib.status(f"{i}/{len(todo)} prepared and uploaded", i, len(todo))
+    protonlib.status_end()
     errs = [u for u, v in st.items() if v.get("phase") == "error"]
     print(f"  Uploaded: {len(uploaded)}   errors: {len(errs)}")
     if not uploaded:

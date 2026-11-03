@@ -652,11 +652,12 @@ class ScanDriveTest(ScriptTestCase):
             json.dump({"drive": files, "fail_list": list(fail_list)}, f)
 
     def scan(self, tty=False):
-        out = io.StringIO()
+        out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(self.plib.sys, "stdin", FakeStdin(tty)), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             tsv, errors = self.plib.scan_drive(self.cli, "/my-files", workers=2,
                                                delay=0, retries=1)
+        self.err = err.getvalue()
         return tsv, errors, out.getvalue()
 
     def paths(self, path):
@@ -674,6 +675,21 @@ class ScanDriveTest(ScriptTestCase):
         for ext in (".partial", ".state", ".queue"):
             self.assertFalse(os.path.exists(self.tsv + ext), ext)
         self.assertTrue(self.plib.scan_complete(self.tsv))
+
+    def test_a_complete_scan_ends_its_progress_line_on_100(self):
+        self.drive({"/my-files/a.txt": "a", "/my-files/Sub/b.txt": "b"})
+        self.scan()
+        last = self.err.rstrip("\n").split("\r")[-1]
+        self.assertRegex(last, r"^  \[\.{20}\] 100%  scanning Proton: 2 folders, 2 files")
+
+    def test_an_incomplete_scan_does_not_end_on_100(self):
+        self.drive({"/my-files/a.txt": "a"})
+        self.scan()
+        self.drive({"/my-files/a.txt": "a", "/my-files/New/n.txt": "n"},
+                   fail_list=["/my-files/New"])
+        self.scan()
+        self.assertNotIn("100%", self.err)
+        self.assertIn(" 99%", self.err)         # 1 file of the 1 the last scan found
 
     def test_incomplete_scan_keeps_the_last_complete_one(self):
         self.drive({"/my-files/a.txt": "a"})
@@ -914,23 +930,23 @@ class RunTimelineTest(ScriptTestCase):
 
     def test_progress_has_a_percentage_when_the_count_is_known(self):
         _, err = self.run_timeline(expected=4)
-        self.assertRegex(err, r"received \d photos \(\d+%\)")
+        self.assertRegex(err, r"\[[. ]{20}\] +\d+%  received \d photos")
         self.assertNotIn("of about", err)
 
     def test_percentage_stops_at_99_while_more_photos_arrive(self):
         _, err = self.run_timeline(expected=2)
         ticks = err.rstrip("\n").split("\r")[1:-1]
-        self.assertIn("(99%)", "".join(ticks))
-        self.assertNotIn("(100%)", "".join(ticks))
+        self.assertIn(" 99%", "".join(ticks))
+        self.assertNotIn("100%", "".join(ticks))
 
     def test_a_successful_read_ends_on_the_real_total_at_100(self):
         _, err = self.run_timeline(expected=400)
         last = err.rstrip("\n").split("\r")[-1]
-        self.assertRegex(last, r"^  received 4 photos \(100%\) \| \d+s *$")
+        self.assertRegex(last, r"^  \[\.{20}\] 100%  received 4 photos \| \d+s *$")
 
     def test_a_failed_read_does_not_end_on_100(self):
         _, err = self.run_timeline(details=False, expected=4)   # the fake fails without -d
-        self.assertNotIn("(100%)", err)
+        self.assertNotIn("100%", err)
         self.assertTrue(err.endswith("\n"))
 
     def test_a_shorter_line_leaves_nothing_of_the_longer_one(self):
@@ -944,16 +960,17 @@ class RunTimelineTest(ScriptTestCase):
         _, err = self.run_timeline()
         ticks = err.rstrip("\n").split("\r")[1:-1]
         self.assertNotIn("%", "".join(ticks))            # first read ever: no count
-        self.assertIn("(100%)", err)                     # but it ends complete
+        self.assertIn("100%", err)                       # but it ends complete
         self.assertEqual(read(self.plib.TIMELINE_COUNT).strip(), "4")
         _, err = self.run_timeline()
-        self.assertRegex(err, r"received \d photos \(\d+%\)")
+        ticks = err.rstrip("\n").split("\r")[1:-1]
+        self.assertRegex("".join(ticks), r"\d+%  received \d photos")
 
     def test_saved_count_wins_over_the_callers_estimate(self):
         self.write(self.plib.TIMELINE_COUNT, "2\n")
         _, err = self.run_timeline(expected=400)
         ticks = err.rstrip("\n").split("\r")[1:-1]
-        self.assertIn("(99%)", "".join(ticks))           # 3 or 4 of 2, not of 400
+        self.assertIn(" 99%", "".join(ticks))           # 3 or 4 of 2, not of 400
 
     def test_a_failed_read_keeps_the_saved_count(self):
         self.write(self.plib.TIMELINE_COUNT, "7\n")
@@ -964,7 +981,7 @@ class RunTimelineTest(ScriptTestCase):
     def test_an_unreadable_count_is_ignored(self):
         self.write(self.plib.TIMELINE_COUNT, "lots\n")
         _, err = self.run_timeline(expected=4)
-        self.assertRegex(err, r"\(\d+%\)")
+        self.assertRegex(err, r"\d+%  received")
 
     def test_timeout_kills_the_cli(self):
         with self.assertRaises(subprocess.TimeoutExpired):
@@ -973,6 +990,50 @@ class RunTimelineTest(ScriptTestCase):
     def test_missing_cli_raises_file_not_found(self):
         with self.assertRaises(FileNotFoundError):
             self.plib.run_timeline(os.path.join(self.tmp, "nope"))
+
+
+class FakeTty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class ProgressLineTest(ScriptTestCase):
+
+    def capture(self, stream, *calls):
+        with contextlib.redirect_stderr(stream):
+            for fn, args, kw in calls:
+                getattr(self.plib, fn)(*args, **kw)
+        return stream.getvalue()
+
+    def test_bar_shows_dots_for_the_part_done(self):
+        self.assertEqual(self.plib.bar(0, 4), "[                    ]   0%")
+        self.assertEqual(self.plib.bar(1, 4), "[.....               ]  25%")
+        self.assertEqual(self.plib.bar(4, 4), "[....................] 100%")
+
+    def test_bar_never_passes_its_cap(self):
+        self.assertEqual(self.plib.bar(9, 4), "[....................] 100%")
+        self.assertIn(" 99%", self.plib.bar(9, 4, cap=99))
+
+    def test_without_a_total_there_is_no_bar(self):
+        err = self.capture(io.StringIO(), ("status", ("sha1: 7 files...",), {}),
+                           ("status_end", (), {}))
+        self.assertEqual(err, "\r  sha1: 7 files...\n")
+
+    def test_in_a_terminal_the_line_is_erased_and_the_cursor_hidden(self):
+        err = self.capture(FakeTty(), ("status", ("a longer line", 1, 2), {}),
+                           ("status", ("short", 2, 2), {}), ("status_end", (), {}))
+        self.assertTrue(err.startswith("\033[?25l"))              # hidden once
+        self.assertEqual(err.count("\033[?25l"), 1)
+        self.assertIn("\r  [....................] 100%  short\033[K", err)
+        self.assertTrue(err.endswith("\n\033[?25h"))             # shown again
+
+    def test_end_without_keeping_wipes_the_line(self):
+        err = self.capture(io.StringIO(), ("status", ("abc",), {}),
+                           ("status_end", (), {"keep": False}))
+        self.assertEqual(err, "\r  abc\r     \r")
+
+    def test_end_without_a_line_writes_nothing(self):
+        self.assertEqual(self.capture(io.StringIO(), ("status_end", (), {})), "")
 
 
 class JsonCountTest(ScriptTestCase):

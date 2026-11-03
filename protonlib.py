@@ -12,6 +12,7 @@ works with no setup from any working directory, as long as this file sits
 next to the script that imports it.
 """
 
+import atexit
 import configparser
 import hashlib
 import json
@@ -105,6 +106,61 @@ TIMELINE_TICK = 2     # seconds between progress lines while reading the timelin
 TIMELINE_COUNT = os.path.join(LOG_DIR, ".photo-timeline-count")
 
 
+# --- the progress line ------------------------------------------------------
+# Every script shows its progress the same way: one line on stderr, redrawn
+# in place, with a bar and a percentage when the total is known:
+#   [..........          ]  50%  sha1: 241/482 files | 4s
+
+BAR_WIDTH = 20
+_line = {"active": False, "width": 0, "hidden": False}
+
+
+def bar(done, total, cap=100):
+    """`[.....     ]  25%`: done of total. `cap` is 99 when the total is only
+    an estimate, so 100% always means finished."""
+    pct = max(0, min(cap, done * 100 // total)) if total else 0
+    n = pct * BAR_WIDTH // 100
+    return f"[{'.' * n}{' ' * (BAR_WIDTH - n)}] {pct:3d}%"
+
+
+def status(msg, done=0, total=0, cap=100):
+    """Redraw the progress line: the bar first when `total` is known, then msg."""
+    line = f"  {bar(done, total, cap)}  {msg}" if total else f"  {msg}"
+    if sys.stderr.isatty():
+        if not _line["hidden"]:
+            sys.stderr.write("\033[?25l")             # no cursor moving along the line
+            _line["hidden"] = True
+        sys.stderr.write("\r" + line + "\033[K")     # erase what a longer line left
+    else:
+        sys.stderr.write("\r" + line.ljust(_line["width"]))
+        _line["width"] = max(_line["width"], len(line))
+    sys.stderr.flush()
+    _line["active"] = True
+
+
+def status_end(keep=True):
+    """Close the progress line: keep it (go to the next line) or wipe it.
+    Nothing happens if no line was drawn."""
+    if _line["active"]:
+        if keep:
+            sys.stderr.write("\n")
+        elif sys.stderr.isatty():
+            sys.stderr.write("\r\033[K")
+        else:
+            sys.stderr.write("\r" + " " * _line["width"] + "\r")
+    _show_cursor()
+    _line.update(active=False, width=0)
+    sys.stderr.flush()
+
+
+@atexit.register
+def _show_cursor():
+    if _line["hidden"]:
+        sys.stderr.write("\033[?25h")
+        sys.stderr.flush()
+        _line["hidden"] = False
+
+
 def run_timeline(cli, details=True, timeout=3600, expected=0):
     """`photo timeline [-d] -j`, like run_cli but with progress on stderr.
 
@@ -112,7 +168,7 @@ def run_timeline(cli, details=True, timeout=3600, expected=0):
     per line: the lines are counted for a percentage, against the photos the
     last read found (TIMELINE_COUNT, written by every read), or `expected`
     when there's no such count yet. That count is only an estimate, so while
-    photos arrive the percentage stops at 99; a successful read ends on 100.
+    photos arrive the bar stops at 99%; a successful read ends on 100%.
     """
     cmd = [cli, "photo", "timeline"] + (["-d"] if details else []) + ["-j"]
     out, err, lines = [], [], [0]
@@ -147,25 +203,15 @@ def _follow_timeline(p, out, err, lines, timeout, expected):
                threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)]
     for t in readers:
         t.start()
-    stop, shown, t0, width = threading.Event(), [], time.time(), [0]
-
-    def show(msg):
-        # padded to the longest line so far: a shorter one leaves nothing behind
-        line = f"  {msg}"
-        sys.stderr.write("\r" + line.ljust(width[0]))
-        width[0] = max(width[0], len(line))
-        sys.stderr.flush()
-        shown.append(True)
+    stop, t0 = threading.Event(), time.time()
 
     def progress():
         while not stop.wait(TIMELINE_TICK):
             n, secs = max(0, lines[0] - 1), int(time.time() - t0)   # line 1 is "["
             if not n:
-                show(f"Proton is listing the photos, nothing received yet | {secs}s")
-            elif expected:
-                show(f"received {n} photos ({min(99, n * 100 // expected)}%) | {secs}s")
+                status(f"Proton is listing the photos, nothing received yet | {secs}s")
             else:
-                show(f"received {n} photos | {secs}s")
+                status(f"received {n} photos | {secs}s", n, expected, cap=99)
 
     shower = threading.Thread(target=progress, daemon=True)
     shower.start()
@@ -182,12 +228,11 @@ def _follow_timeline(p, out, err, lines, timeout, expected):
         shower.join()
         for t in readers:
             t.join(5 if killed else None)   # a killed CLI's children may hold the pipe
-        if shown and not killed and p.returncode == 0:
+        if _line["active"] and not killed and p.returncode == 0:
             # the last tick may be well short of the end: close on the real total
             n = max(0, lines[0] - 2)                # less the "[" and "]" lines
-            show(f"received {n} photos (100%) | {int(time.time() - t0)}s")
-        if shown:
-            sys.stderr.write("\n")
+            status(f"received {n} photos | {int(time.time() - t0)}s", n, n)
+        status_end()
 
 
 def json_count(path):
@@ -349,13 +394,12 @@ def suggest_reuse(path, what, option):
         return
     try:
         for left in range(REUSE_HINT_WAIT, 0, -1):
-            sys.stderr.write(f"\r  Reading again in {left}s... ")
-            sys.stderr.flush()
+            status(f"Reading again in {left}s...")
             time.sleep(1)
     except KeyboardInterrupt:
-        sys.stderr.write("\n")
+        status_end()
         sys.exit(f"Stopped before reading from Proton: run again with {option}.")
-    sys.stderr.write("\r" + " " * 40 + "\r")
+    status_end(keep=False)
 
 
 def _process_alive(pid):
@@ -410,8 +454,8 @@ def _to_epoch(iso):
 
 
 class _Scanner:
-    def __init__(self, cli, out, state_base, workers, delay, timeout, retries):
-        self.cli, self.out = cli, out
+    def __init__(self, cli, out, state_base, workers, delay, timeout, retries, expected=0):
+        self.cli, self.out, self.expected = cli, out, expected
         self.workers, self.delay, self.timeout, self.retries = workers, delay, timeout, retries
         self.q = queue.Queue()
         self.lock = threading.Lock()
@@ -525,14 +569,16 @@ class _Scanner:
                         self.pending_cv.notify_all()
                 self.q.task_done()
 
-    def progress_loop(self, stop):
-        t0 = time.time()
+    def show(self, t0, total, cap):
+        with self.lock:
+            d, f, e = self.done_folders, self.files_found, len(self.errors)
+        status(f"scanning Proton: {d} folders, {f} files, {e} errors "
+               f"| {int(time.time() - t0)}s | queued: {self.q.qsize()}",
+               f, total if total is not None else f, cap)
+
+    def progress_loop(self, stop, t0):
         while not stop.wait(2):
-            with self.lock:
-                d, f, e = self.done_folders, self.files_found, len(self.errors)
-            sys.stderr.write(f"\r  scanning Proton: {d} folders, {f} files, {e} errors "
-                             f"| {int(time.time() - t0)}s | queued: {self.q.qsize()}   ")
-            sys.stderr.flush()
+            self.show(t0, self.expected, 99)
 
     def run(self, root, resume):
         todo = []
@@ -550,6 +596,8 @@ class _Scanner:
                             todo.append((parts[0], parts[1]))
             self.visited |= already
             mode = "a"
+            with open(self.out) as fh:          # files found before the interruption
+                self.files_found = sum(1 for l in fh if l.strip())
         else:
             for p in (self.out, self.state_path, self.queue_path):
                 if os.path.exists(p):
@@ -560,8 +608,9 @@ class _Scanner:
                     self.enqueue(rp, rel)
             elif not resume:
                 self.enqueue(root, "")
-            stop = threading.Event()
-            threading.Thread(target=self.progress_loop, args=(stop,), daemon=True).start()
+            stop, t0 = threading.Event(), time.time()
+            shower = threading.Thread(target=self.progress_loop, args=(stop, t0), daemon=True)
+            shower.start()
             threads = [threading.Thread(target=self.worker, args=(fh,))
                        for _ in range(self.workers)]
             for t in threads:
@@ -569,7 +618,10 @@ class _Scanner:
             for t in threads:
                 t.join()
             stop.set()
-        sys.stderr.write("\n")
+            shower.join()
+        # complete: 100% on the real total; with errors, where it stopped
+        self.show(t0, None if not self.errors else self.expected, 99 if self.errors else 100)
+        status_end()
 
 
 def scan_drive(cli, root, workers=3, delay=0.2, timeout=300, retries=3, log_dir=LOG_DIR):
@@ -611,7 +663,9 @@ def _scan_locked(cli, root, out, workers, delay, timeout, retries):
     except Exception:
         pass
     t0 = time.time()
-    sc = _Scanner(cli, partial, out, workers, delay, timeout, retries)
+    # the last complete scan says about how many files to expect
+    expected = len(read_scan(out)) if scan_complete(out) else 0
+    sc = _Scanner(cli, partial, out, workers, delay, timeout, retries, expected)
     sc.run(root, resume)
     if sc.undecryptable:
         print(f"  WARNING: {len(sc.undecryptable)} names on Proton couldn't be decrypted "

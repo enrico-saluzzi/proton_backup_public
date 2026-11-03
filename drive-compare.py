@@ -257,8 +257,8 @@ def scan_folder(root, exclude):
             if not dataless and st.st_size == 0 and getattr(st, "st_blocks", 1) == 0:
                 dataless = None   # suspicious: 0 bytes and 0 blocks, confirm with Proton
             files[protonlib.nfc(rel)] = (st.st_size, int(st.st_mtime), full, dataless)
-        sys.stderr.write(f"\r  folder: {len(files)} files...")
-    sys.stderr.write("\r" + " " * 40 + "\r")
+        protonlib.status(f"folder: {len(files)} files...")
+    protonlib.status_end(keep=False)
     return files
 
 
@@ -368,7 +368,7 @@ def compare(s, local, remote, include_online):
             res.local_sha[rel] = protonlib.sha1_of(local[rel][2])
             res.hashed += 1
             if res.hashed % 50 == 0:
-                sys.stderr.write(f"\r  sha1: {res.hashed} files...")
+                protonlib.status(f"sha1: {res.hashed} files...")
         return res.local_sha[rel]
 
     def to_decide_diff(rel, reason):
@@ -449,8 +449,7 @@ def compare(s, local, remote, include_online):
             res.moved.append((rel, found, how))
         else:
             res.decide_missing.append(rel)
-    if res.hashed >= 50:
-        sys.stderr.write("\r" + " " * 40 + "\r")
+    protonlib.status_end(keep=False)
 
     moved_to = {m[1] for m in res.moved}
     for rel in sorted(set(remote) - set(local)):

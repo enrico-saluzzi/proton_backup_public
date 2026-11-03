@@ -268,10 +268,12 @@ def main():
             st[u] = st.get(u) if str(st.get(u, "")).startswith("trashed") else "done"
         if i % 20 == 0:
             save_state()
-            sys.stderr.write(f"\r  {i}/{len(to_remove)} | {int(time.time()-t0)}s   ")
-            sys.stderr.flush()
+            protonlib.status(f"{i}/{len(to_remove)} | {int(time.time()-t0)}s", i, len(to_remove))
     save_state()
-    sys.stderr.write("\n")
+    if to_remove:
+        protonlib.status(f"{len(to_remove)}/{len(to_remove)} | {int(time.time()-t0)}s",
+                         len(to_remove), len(to_remove))
+    protonlib.status_end()
 
     print("")
     print(f"  Trashed on Proton   : {trashed}")
