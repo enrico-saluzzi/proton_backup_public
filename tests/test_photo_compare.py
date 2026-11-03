@@ -32,25 +32,72 @@ from helpers import ScriptTestCase, read  # noqa: E402
 
 FAKE_TIMELINE_CLI = textwrap.dedent('''\
     #!/usr/bin/env python3
-    """Fake proton-drive answering only `photo timeline -d -j`. $FAKE_STATE:
+    """Fake proton-drive: `photo timeline -d -j`, `album list -j`, `album photos`,
+    and `photo upload`, `album create`, `album add-photo`, which change the
+    state. $FAKE_STATE:
     {"photos": [{"uid": "u1", "name": "a.jpg", "content": "...",
-                 "capture": "2024-05-03T10:22:11Z"}]}
-    Every call is appended as a JSON list to $FAKE_STATE.calls."""
+                 "capture": "2024-05-03T10:22:11Z", "albums": ["a1"],
+                 "hidden_reads": 0}],
+     "albums": [{"uid": "a1", "name": "Wedding"}], "album_list_fails": false,
+     "upload_hidden_reads": 0, "add_fails": false}
+    A photo with hidden_reads > 0 is left out of that many timeline reads (not
+    indexed yet); uploads get upload_hidden_reads. Every call is appended as
+    a JSON list to $FAKE_STATE.calls."""
     import hashlib, json, os, sys
     st = json.load(open(os.environ["FAKE_STATE"], encoding="utf-8"))
     args = sys.argv[1:]
     with open(os.environ["FAKE_STATE"] + ".calls", "a", encoding="utf-8") as f:
         f.write(json.dumps(args) + "\\n")
+    def save():
+        json.dump(st, open(os.environ["FAKE_STATE"], "w", encoding="utf-8"))
+
+    def album_of(path):
+        key = path.split("/", 2)[-1]
+        return next((x for x in st.get("albums", []) if key in (x["uid"], x["name"])), None)
+
     if args == ["photo", "timeline", "-d", "-j"]:
         out = []
         for p in st.get("photos", []):
+            if p.get("hidden_reads", 0) > 0:
+                p["hidden_reads"] -= 1
+                continue
             b = p["content"].encode()
             out.append({"uid": p["uid"], "name": {"ok": True, "value": p["name"]},
                         "mediaType": "image/jpeg",
-                        "photo": {"captureTime": p["capture"]},
+                        "photo": {"captureTime": p["capture"],
+                                  "albums": [{"nodeUid": u} for u in p.get("albums", [])]},
                         "activeRevision": {"claimedSize": len(b),
                                            "claimedDigests": {"sha1": hashlib.sha1(b).hexdigest()}}})
+        save()
         print(json.dumps(out)); sys.exit(0)
+    if args == ["album", "list", "-j"]:
+        if st.get("album_list_fails"):
+            print("network error", file=sys.stderr); sys.exit(1)
+        print(json.dumps([{"uid": x["uid"], "name": {"ok": True, "value": x["name"]},
+                           "type": "album"} for x in st.get("albums", [])]))
+        sys.exit(0)
+    if args[:2] == ["album", "photos"]:
+        sys.exit(0 if album_of(args[-1]) else 1)
+    if args[:2] == ["album", "create"]:
+        st.setdefault("albums", []).append({"uid": "a-new", "name": args[2]})
+        save(); sys.exit(0)
+    if args[:2] == ["album", "add-photo"]:
+        alb = album_of(args[2])
+        if alb is None or st.get("add_fails"):
+            print("album add failed", file=sys.stderr); sys.exit(1)
+        for path in args[3:]:
+            for p in st["photos"]:
+                if p["uid"] == path.split("/")[-1]:
+                    p.setdefault("albums", []).append(alb["uid"])
+        save(); sys.exit(0)
+    if args[:4] == ["photo", "upload", "-c", "rename"]:
+        for path in args[4:]:
+            n = len(st["photos"]) + 1
+            st["photos"].append({"uid": f"new{n}", "name": os.path.basename(path),
+                                 "content": open(path, encoding="utf-8").read(),
+                                 "capture": "2026-01-01T00:00:00Z",
+                                 "hidden_reads": st.get("upload_hidden_reads", 0)})
+        save(); sys.exit(0)
     print("unknown: " + " ".join(args), file=sys.stderr); sys.exit(2)
 ''')
 
@@ -311,13 +358,26 @@ class SetupTest(PhotoCompareTestCase):
         return dict(cfg.items(f"photo-compare {name}", raw=True))
 
     def test_new_profile_with_explicit_answers(self):
-        rc, _ = self.run_setup([self.camera, "Europe/Rome", "2", "no", "yes", "10"], "camera")
+        rc, _ = self.run_setup([self.camera, "Europe/Rome", "2", "no", "yes", "10",
+                                "2026 - Wedding"], "camera")
         self.assertEqual(rc, 0)
         s = self.saved()
         self.assertEqual(s["folder"], self.camera)
         self.assertEqual(s["tz"], "Europe/Rome")
         self.assertEqual((s["tolerance"], s["exif"], s["upload_script"], s["batch"]),
                          ("2", "no", "yes", "10"))
+        self.assertEqual(s["album"], "2026 - Wedding")
+
+    def test_album_is_asked_only_with_the_upload_script(self):
+        _, prompts = self.run_setup([self.camera, "", "", "", "no", ""], "camera")
+        self.assertFalse(any(p.strip().startswith("album") for p in prompts))
+        self.assertEqual(self.saved()["album"], "")
+
+    def test_album_none_means_no_album_and_slashes_are_refused(self):
+        _, prompts = self.run_setup([self.camera, "", "", "", "yes", "", "a/b", "none"],
+                                    "camera")
+        self.assertEqual(sum(1 for p in prompts if p.strip().startswith("album")), 2)
+        self.assertEqual(self.saved()["album"], "")
 
     def test_enter_keeps_the_defaults_and_this_macs_time_zone(self):
         self.run_setup([self.camera, "", "", "", "", ""], "camera")
@@ -533,6 +593,227 @@ class EndToEndTest(PhotoCompareTestCase):
         rc, out = self.run_main(self.camera, "--tz", "UTC", "--no-exif")
         self.assertEqual(rc, 0)
         self.assertIn("Every local photo is on Proton", out)
+
+    # album
+
+    def set_albums(self, albums, members=()):
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        st["albums"] = albums
+        for p in st["photos"]:
+            p["albums"] = [a for u, a in members if u == p["uid"]]
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+
+    def run_album(self, *extra):
+        return self.run_main(self.camera, "--tz", "UTC", "--no-exif",
+                             "--album", "Wedding", *extra)
+
+    def calls_after(self, script):
+        """Run the generated script against the fake CLI; the calls it made."""
+        before = len(self.timeline_calls())
+        r = subprocess.run(["bash", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return self.timeline_calls()[before:], r.stdout
+
+    def test_new_album_is_created_and_gets_the_photos_already_on_proton(self):
+        self.set_albums([{"uid": "a9", "name": "Other"}])
+        rc, out = self.run_album()
+        self.assertEqual(rc, 1)
+        self.assertIn('Album "Wedding": not on Proton yet, the script creates it', out)
+        self.assertIn("to add, already on Proton: 2", out)
+        self.assertIn("to add after the upload: 1 (the script does it at the end)", out)
+        script = self.upload_script("Camera_Uploads")
+        calls, stdout = self.calls_after(script)
+        self.assertEqual(calls[0], ["album", "photos", "/albums/Wedding"])
+        self.assertEqual(calls[1], ["album", "create", "Wedding"])
+        self.assertEqual(calls[2], ["photo", "upload", "-c", "rename", self.missing])
+        self.assertEqual(calls[3], ["album", "add-photo", "/albums/Wedding",
+                                    "/photos/u1", "/photos/u2"])
+        # --finish-album: the uploaded photo, found by content
+        self.assertIn(["album", "add-photo", "/albums/a-new", "/photos/new3"], calls[4:])
+        self.assertIn("Added to the album: 2", stdout)
+        self.assertIn("Added to the album: 1   failed: 0   not found on Proton: 0", stdout)
+        # one run was enough
+        rc, out = self.run_album()
+        self.assertEqual(rc, 0)
+        self.assertIn("Every local photo is on Proton, and in the album.", out)
+        self.assertEqual(self.verify_line(script),
+                         f"./photo-compare.py '{self.camera}' --album Wedding")
+
+    def test_script_run_again_does_not_create_a_second_album(self):
+        self.set_albums([])
+        self.run_album()
+        script = self.upload_script("Camera_Uploads")
+        self.set_albums([{"uid": "a1", "name": "Wedding"}])     # created by the first run
+        calls, _ = self.calls_after(script)
+        self.assertNotIn(["album", "create", "Wedding"], calls)
+
+    def test_album_names_are_never_expanded_by_the_shell(self):
+        self.set_albums([])
+        self.run_main(self.camera, "--tz", "UTC", "--no-exif", "--album", "Cost $HOME `x`")
+        calls, _ = self.calls_after(self.upload_script("Camera_Uploads"))
+        self.assertIn(["album", "create", "Cost $HOME `x`"], calls)
+
+    def test_existing_album_gets_only_the_photos_not_in_it_by_uid(self):
+        self.set_albums([{"uid": "a1", "name": "Wedding"}], members=[("u1", "a1")])
+        _, out = self.run_album()
+        self.assertIn('Album "Wedding": 1 of these photos already in it', out)
+        calls, _ = self.calls_after(self.upload_script("Camera_Uploads"))
+        self.assertNotIn("create", [c[1] for c in calls])
+        self.assertIn(["album", "add-photo", "/albums/a1", "/photos/u2"], calls)
+
+    def test_everything_on_proton_and_in_the_album_writes_no_script(self):
+        os.remove(self.missing)
+        self.set_albums([{"uid": "a1", "name": "Wedding"}],
+                        members=[("u1", "a1"), ("u2", "a1")])
+        rc, out = self.run_album()
+        self.assertEqual(rc, 0)
+        self.assertIn("nothing to upload or add to the album", out)
+        self.assertIn("Every local photo is on Proton, and in the album.", out)
+        self.assertEqual(glob.glob(os.path.join(self.out, "photos-upload-*.sh")), [])
+
+    def test_photos_on_proton_but_not_in_the_album_exit_1(self):
+        os.remove(self.missing)
+        self.set_albums([{"uid": "a1", "name": "Wedding"}], members=[("u1", "a1")])
+        rc, out = self.run_album()
+        self.assertEqual(rc, 1)
+        calls, _ = self.calls_after(self.upload_script("Camera_Uploads"))
+        self.assertEqual(calls, [["album", "add-photo", "/albums/a1", "/photos/u2"]])
+
+    def test_album_in_the_profile_writes_the_script_and_keeps_verify_short(self):
+        self.write_config(f"""
+            [photo-compare camera]
+            folder = {self.camera}
+            tz = UTC
+            exif = no
+            album = Wedding
+            """)
+        self.set_albums([])
+        self.run_main()
+        script = self.upload_script("camera")
+        self.assertEqual(self.verify_line(script), "./photo-compare.py camera")
+        self.assertIn('# Album "Wedding": created first', read(script))
+
+    def test_two_albums_with_the_same_name_is_an_error(self):
+        self.set_albums([{"uid": "a1", "name": "Wedding"}, {"uid": "a2", "name": "Wedding"}])
+        self.assertExits(self.run_album, "2 albums on Proton are called 'Wedding'")
+
+    def test_unreadable_album_list_is_an_error(self):
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        st["album_list_fails"] = True
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        self.assertExits(self.run_album, "ERROR from 'album list'")
+
+    def test_album_name_with_a_slash_is_an_error(self):
+        self.assertExits(lambda: self.run_main(self.camera, "--album", "a/b"),
+                         "can't contain '/'")
+
+    # --finish-album, called by the script after the uploads
+
+    def update_state(self, **kw):
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        st.update(kw)
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+
+    def compare_then_upload(self):
+        """Compare with a new album, then upload as the script would; returns
+        the manifest the script would hand to --finish-album."""
+        self.set_albums([{"uid": "a1", "name": "Wedding"}])
+        self.run_album()
+        found = glob.glob(os.path.join(self.out, "photos-album-Camera_Uploads-*.json"))
+        self.assertEqual(len(found), 1, found)
+        subprocess.run([self.cli, "photo", "upload", "-c", "rename", self.missing], check=True)
+        return found[0]
+
+    def finish(self, manifest):
+        self.pc.FINISH_WAIT = 0
+        with mock.patch.object(sys, "argv", ["photo-compare.py", "--finish-album", manifest,
+                                             "--cli", self.cli]), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()):
+            rc = self.pc.main()
+        return rc, out.getvalue()
+
+    def test_manifest_lists_the_files_to_upload(self):
+        manifest = self.compare_then_upload()
+        m = json.loads(read(manifest))
+        self.assertEqual((m["album"], m["paths"]), ("Wedding", [self.missing]))
+
+    def test_finish_waits_for_proton_to_index_the_uploads(self):
+        self.update_state(upload_hidden_reads=2)
+        rc, out = self.finish(self.compare_then_upload())
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("not on the timeline yet"), 2)
+        self.assertIn("Added to the album: 1   failed: 0   not found on Proton: 0", out)
+        self.assertIn(["album", "add-photo", "/albums/a1", "/photos/new3"],
+                      self.timeline_calls())
+
+    def test_finish_gives_up_and_says_what_to_run_later(self):
+        self.update_state(upload_hidden_reads=99)
+        rc, out = self.finish(self.compare_then_upload())
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.count("not on the timeline yet"), self.pc.FINISH_TRIES - 1)
+        self.assertIn("not found on Proton: 1", out)
+        self.assertIn(f"not found: {self.missing}", out)
+        self.assertIn("Run this again later:", out)
+
+    def test_finish_reports_a_failed_add(self):
+        self.update_state(add_fails=True)
+        rc, out = self.finish(self.compare_then_upload())
+        self.assertEqual(rc, 1)
+        self.assertIn("Added to the album: 0   failed: 1", out)
+
+    def test_finish_skips_files_the_script_did_not_upload(self):
+        manifest = self.compare_then_upload()
+        open(self.missing, "w").close()          # empty now: the script skips it
+        rc, out = self.finish(manifest)
+        self.assertEqual(rc, 0)
+        self.assertIn("adding the 0 photos just uploaded", out)
+
+    def test_finish_leaves_alone_a_photo_already_in_the_album(self):
+        manifest = self.compare_then_upload()
+        with open(self.state, encoding="utf-8") as f:
+            st = json.load(f)
+        st["photos"][-1]["albums"] = ["a1"]
+        with open(self.state, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+        rc, out = self.finish(manifest)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any(c[:2] == ["album", "add-photo"] for c in self.timeline_calls()))
+
+    def test_finish_without_the_album_is_an_error(self):
+        manifest = self.compare_then_upload()
+        self.set_albums([])
+        self.pc.FINISH_WAIT = 0
+        self.assertExits(lambda: self.finish(manifest), "no album called 'Wedding'")
+
+    def test_finish_with_an_unreadable_manifest_is_an_error(self):
+        bad = self.write(os.path.join(self.tmp, "bad.json"), "{not json")
+        self.assertExits(lambda: self.finish(bad), "can't read")
+
+    def test_script_skips_finish_when_nothing_was_uploaded(self):
+        self.set_albums([{"uid": "a1", "name": "Wedding"}])
+        self.run_album()
+        script = self.upload_script("Camera_Uploads")
+        open(self.missing, "w").close()
+        calls, _ = self.calls_after(script)
+        self.assertFalse(any(c[:3] == ["photo", "timeline", "-d"] for c in calls))
+
+    def test_no_manifest_without_photos_to_upload(self):
+        os.remove(self.missing)
+        self.set_albums([{"uid": "a1", "name": "Wedding"}])
+        self.run_album()
+        self.assertEqual(glob.glob(os.path.join(self.out, "photos-album-*.json")), [])
+        self.assertNotIn("--finish-album", read(self.upload_script("Camera_Uploads")))
+
+    def test_no_album_list_call_without_an_album(self):
+        self.run_main(self.camera, "--tz", "UTC", "--no-exif")
+        self.assertFalse(any(c[:1] == ["album"] for c in self.timeline_calls()))
 
 
 if __name__ == "__main__":
