@@ -56,8 +56,8 @@ single command and does everything it needs by itself.
 
 | I want to... | Script |
 |---|---|
-| back up my Drive files to a local disk | `file-backup.py` (set up once with `--setup`) |
-| check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
+| back up my Drive files to a local disk | [`file-backup.py`](#monthly-backup) |
+| check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | [`drive-compare.py`](#migrating-from-another-cloud-eg-dropbox) |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and **sha1** of every file. The CLI lists one folder per call, three calls in parallel: count about a second per folder, so **half an hour or more** for a Drive with a few thousand folders. 
 
@@ -72,10 +72,10 @@ Both read their choices from a **profile** in `config.ini`, like every other scr
 
 | I want to... | Script |
 |---|---|
-| back up my Photos, in year folders and albums | `photo-backup.py` (set up once with `--setup`) |
-| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | `photo-compare.py` (set up once with `--setup`) |
-| delete photos by browsing the backup, then trash them on Proton too | `photo-prune.py` |
-| fix the date of scanned prints that sit in the wrong year | `photo-redate.py`, then `--apply` |
+| back up my Photos, in year folders and albums | [`photo-backup.py`](#monthly-backup-1) |
+| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | [`photo-compare.py`](#migrating-from-another-cloud-eg-camera-uploads) |
+| delete photos by browsing the backup, then trash them on Proton too | [`photo-prune.py`](#pruning-photos) |
+| fix the date of scanned prints that sit in the wrong year | [`photo-redate.py`](#fixing-dates-of-scanned-photos), then `--apply` |
 
 The photo scripts use profiles too, in the same file: `[photo-backup ssd]`
 (the backup folder, the albums) and `[photo-compare camera]` (the folder to
