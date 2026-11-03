@@ -107,7 +107,8 @@ def run_timeline(cli, details=True, timeout=3600, expected=0):
 
     The CLI says nothing while it lists the timeline, then prints one photo
     per line: the lines are counted, against `expected` (the photos read last
-    time; 0 = unknown) for a percentage.
+    time; 0 = unknown) for a percentage. That count is only an estimate, so
+    the percentage stops at 100 when more photos arrive.
     """
     cmd = [cli, "photo", "timeline"] + (["-d"] if details else []) + ["-j"]
     out, err, lines = [], [], [0]
@@ -133,17 +134,19 @@ def _follow_timeline(p, out, err, lines, timeout, expected):
     stop, shown = threading.Event(), []
 
     def progress():
-        t0 = time.time()
+        t0, width = time.time(), 0
         while not stop.wait(TIMELINE_TICK):
             n, secs = max(0, lines[0] - 1), int(time.time() - t0)   # line 1 is "["
             if not n:
                 msg = f"Proton is listing the photos, nothing received yet | {secs}s"
             elif expected:
-                msg = (f"received {n} of about {expected} photos "
-                       f"({min(99, n * 100 // expected)}%) | {secs}s")
+                msg = f"received {n} photos ({min(100, n * 100 // expected)}%) | {secs}s"
             else:
                 msg = f"received {n} photos | {secs}s"
-            sys.stderr.write(f"\r  {msg}   ")
+            # padded to the longest line so far: a shorter one leaves nothing behind
+            line = f"  {msg}"
+            sys.stderr.write("\r" + line.ljust(width))
+            width = max(width, len(line))
             sys.stderr.flush()
             shown.append(True)
 

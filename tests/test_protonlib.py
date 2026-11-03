@@ -914,7 +914,20 @@ class RunTimelineTest(ScriptTestCase):
 
     def test_progress_has_a_percentage_when_the_count_is_known(self):
         _, err = self.run_timeline(expected=4)
-        self.assertRegex(err, r"received \d of about 4 photos \(\d+%\)")
+        self.assertRegex(err, r"received \d photos \(\d+%\)")
+        self.assertNotIn("of about", err)
+
+    def test_percentage_stops_at_100_when_more_photos_arrive(self):
+        _, err = self.run_timeline(expected=2)
+        self.assertIn("(100%)", err)
+        self.assertNotRegex(err, r"\((1[1-9]\d|[2-9]\d\d)%\)")
+
+    def test_a_shorter_line_leaves_nothing_of_the_longer_one(self):
+        _, err = self.run_timeline(expected=4)
+        lines = err.rstrip("\n").split("\r")[1:]
+        self.assertIn("nothing received yet", lines[0])
+        for before, after in zip(lines, lines[1:]):
+            self.assertGreaterEqual(len(after), len(before.rstrip()))
 
     def test_timeout_kills_the_cli(self):
         with self.assertRaises(subprocess.TimeoutExpired):
