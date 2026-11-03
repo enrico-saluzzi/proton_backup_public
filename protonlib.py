@@ -100,21 +100,37 @@ def run_cli(cli, cmd, timeout, capture=True):
 
 
 TIMELINE_TICK = 2     # seconds between progress lines while reading the timeline
+# how many photos the last timeline read found, whichever script read it:
+# the next read shows a percentage against it
+TIMELINE_COUNT = os.path.join(LOG_DIR, ".photo-timeline-count")
 
 
 def run_timeline(cli, details=True, timeout=3600, expected=0):
     """`photo timeline [-d] -j`, like run_cli but with progress on stderr.
 
     The CLI says nothing while it lists the timeline, then prints one photo
-    per line: the lines are counted, against `expected` (the photos read last
-    time; 0 = unknown) for a percentage. That count is only an estimate, so
-    the percentage stops at 100 when more photos arrive.
+    per line: the lines are counted for a percentage, against the photos the
+    last read found (TIMELINE_COUNT, written by every read), or `expected`
+    when there's no such count yet. That count is only an estimate, so the
+    percentage stops at 100 when more photos arrive.
     """
     cmd = [cli, "photo", "timeline"] + (["-d"] if details else []) + ["-j"]
     out, err, lines = [], [], [0]
+    try:
+        with open(TIMELINE_COUNT, encoding="utf-8") as f:
+            expected = int(f.read().strip()) or expected
+    except (OSError, ValueError):
+        pass
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL) as p:
         _follow_timeline(p, out, err, lines, timeout, expected)
+    if p.returncode == 0 and lines[0] > 2:
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(TIMELINE_COUNT, "w", encoding="utf-8") as f:
+                f.write(f"{lines[0] - 2}\n")        # less the "[" and "]" lines
+        except OSError:
+            pass
     return subprocess.CompletedProcess(cmd, p.returncode,
                                        b"".join(out).decode("utf-8", "replace"),
                                        b"".join(err).decode("utf-8", "replace"))
