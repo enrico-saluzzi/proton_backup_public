@@ -917,10 +917,21 @@ class RunTimelineTest(ScriptTestCase):
         self.assertRegex(err, r"received \d photos \(\d+%\)")
         self.assertNotIn("of about", err)
 
-    def test_percentage_stops_at_100_when_more_photos_arrive(self):
+    def test_percentage_stops_at_99_while_more_photos_arrive(self):
         _, err = self.run_timeline(expected=2)
-        self.assertIn("(100%)", err)
-        self.assertNotRegex(err, r"\((1[1-9]\d|[2-9]\d\d)%\)")
+        ticks = err.rstrip("\n").split("\r")[1:-1]
+        self.assertIn("(99%)", "".join(ticks))
+        self.assertNotIn("(100%)", "".join(ticks))
+
+    def test_a_successful_read_ends_on_the_real_total_at_100(self):
+        _, err = self.run_timeline(expected=400)
+        last = err.rstrip("\n").split("\r")[-1]
+        self.assertRegex(last, r"^  received 4 photos \(100%\) \| \d+s *$")
+
+    def test_a_failed_read_does_not_end_on_100(self):
+        _, err = self.run_timeline(details=False, expected=4)   # the fake fails without -d
+        self.assertNotIn("(100%)", err)
+        self.assertTrue(err.endswith("\n"))
 
     def test_a_shorter_line_leaves_nothing_of_the_longer_one(self):
         _, err = self.run_timeline(expected=4)
@@ -931,7 +942,9 @@ class RunTimelineTest(ScriptTestCase):
 
     def test_each_read_saves_its_count_for_the_next_percentage(self):
         _, err = self.run_timeline()
-        self.assertNotIn("%", err)                       # first read ever: no count
+        ticks = err.rstrip("\n").split("\r")[1:-1]
+        self.assertNotIn("%", "".join(ticks))            # first read ever: no count
+        self.assertIn("(100%)", err)                     # but it ends complete
         self.assertEqual(read(self.plib.TIMELINE_COUNT).strip(), "4")
         _, err = self.run_timeline()
         self.assertRegex(err, r"received \d photos \(\d+%\)")
@@ -939,7 +952,8 @@ class RunTimelineTest(ScriptTestCase):
     def test_saved_count_wins_over_the_callers_estimate(self):
         self.write(self.plib.TIMELINE_COUNT, "2\n")
         _, err = self.run_timeline(expected=400)
-        self.assertIn("(100%)", err)                     # 3 or 4 of 2, not of 400
+        ticks = err.rstrip("\n").split("\r")[1:-1]
+        self.assertIn("(99%)", "".join(ticks))           # 3 or 4 of 2, not of 400
 
     def test_a_failed_read_keeps_the_saved_count(self):
         self.write(self.plib.TIMELINE_COUNT, "7\n")

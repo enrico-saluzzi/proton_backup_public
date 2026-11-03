@@ -111,8 +111,8 @@ def run_timeline(cli, details=True, timeout=3600, expected=0):
     The CLI says nothing while it lists the timeline, then prints one photo
     per line: the lines are counted for a percentage, against the photos the
     last read found (TIMELINE_COUNT, written by every read), or `expected`
-    when there's no such count yet. That count is only an estimate, so the
-    percentage stops at 100 when more photos arrive.
+    when there's no such count yet. That count is only an estimate, so while
+    photos arrive the percentage stops at 99; a successful read ends on 100.
     """
     cmd = [cli, "photo", "timeline"] + (["-d"] if details else []) + ["-j"]
     out, err, lines = [], [], [0]
@@ -147,24 +147,25 @@ def _follow_timeline(p, out, err, lines, timeout, expected):
                threading.Thread(target=lambda: err.append(p.stderr.read()), daemon=True)]
     for t in readers:
         t.start()
-    stop, shown = threading.Event(), []
+    stop, shown, t0, width = threading.Event(), [], time.time(), [0]
+
+    def show(msg):
+        # padded to the longest line so far: a shorter one leaves nothing behind
+        line = f"  {msg}"
+        sys.stderr.write("\r" + line.ljust(width[0]))
+        width[0] = max(width[0], len(line))
+        sys.stderr.flush()
+        shown.append(True)
 
     def progress():
-        t0, width = time.time(), 0
         while not stop.wait(TIMELINE_TICK):
             n, secs = max(0, lines[0] - 1), int(time.time() - t0)   # line 1 is "["
             if not n:
-                msg = f"Proton is listing the photos, nothing received yet | {secs}s"
+                show(f"Proton is listing the photos, nothing received yet | {secs}s")
             elif expected:
-                msg = f"received {n} photos ({min(100, n * 100 // expected)}%) | {secs}s"
+                show(f"received {n} photos ({min(99, n * 100 // expected)}%) | {secs}s")
             else:
-                msg = f"received {n} photos | {secs}s"
-            # padded to the longest line so far: a shorter one leaves nothing behind
-            line = f"  {msg}"
-            sys.stderr.write("\r" + line.ljust(width))
-            width = max(width, len(line))
-            sys.stderr.flush()
-            shown.append(True)
+                show(f"received {n} photos | {secs}s")
 
     shower = threading.Thread(target=progress, daemon=True)
     shower.start()
@@ -179,10 +180,14 @@ def _follow_timeline(p, out, err, lines, timeout, expected):
     finally:
         stop.set()
         shower.join()
-        if shown:
-            sys.stderr.write("\n")
         for t in readers:
             t.join(5 if killed else None)   # a killed CLI's children may hold the pipe
+        if shown and not killed and p.returncode == 0:
+            # the last tick may be well short of the end: close on the real total
+            n = max(0, lines[0] - 2)                # less the "[" and "]" lines
+            show(f"received {n} photos (100%) | {int(time.time() - t0)}s")
+        if shown:
+            sys.stderr.write("\n")
 
 
 def json_count(path):
