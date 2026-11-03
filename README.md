@@ -60,9 +60,9 @@ single command and does everything it needs by itself.
 | check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and **sha1** of every file. The CLI lists one folder per call, three calls in parallel: count about a second per folder, so **half an hour or more** for a Drive with a few thousand folders. 
-<br><br>
+
 `--root` picks the remote folder (default `/my-files`, the whole Drive). The scan is saved in `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the command stops, and running it again resumes the scan; `--reuse-scan` skips it and uses the last complete one. 
-<br><br>
+
 A new scan replaces the last complete one only when it completes, so stopping it never loses the previous scan. When the last complete scan is less than an hour old, the script says so and waits 10 seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed on Proton since. The two scripts share the scan, so only one can scan a given folder at a time: the second one stops and says to wait and then use
 `--reuse-scan`.
 
