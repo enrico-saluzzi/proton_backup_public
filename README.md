@@ -516,6 +516,7 @@ plan you reviewed, and is resumable.
 | `redate-plan.json`, `reupload-state.json` | `photo-redate.py` | `photo-redate.py --apply` |
 | `prune-state.json` | `photo-prune.py` | the same, to resume |
 | `~/drive-sync-logs/proton-photo-timeline.json` | `photo-compare.py` | `photo-compare.py --reuse-scan` |
+| `~/drive-sync-logs/.photo-timeline-count` (photos found by the last timeline read) | every photo script that reads the timeline | the next read, for its percentage |
 | `~/.config/proton-backup/ignore-<profile>.txt` | `drive-compare.py` review (`i`), or you | `drive-compare.py` |
 | `~/drive-sync-logs/drive-compare-<profile>-<timestamp>.txt` (the report) | `drive-compare.py` | you |
 | `~/drive-sync-logs/copy-to-proton-*.sh` | `drive-compare.py`, when there's something to copy | you, after reviewing it |

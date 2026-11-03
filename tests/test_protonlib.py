@@ -929,6 +929,29 @@ class RunTimelineTest(ScriptTestCase):
         for before, after in zip(lines, lines[1:]):
             self.assertGreaterEqual(len(after), len(before.rstrip()))
 
+    def test_each_read_saves_its_count_for_the_next_percentage(self):
+        _, err = self.run_timeline()
+        self.assertNotIn("%", err)                       # first read ever: no count
+        self.assertEqual(read(self.plib.TIMELINE_COUNT).strip(), "4")
+        _, err = self.run_timeline()
+        self.assertRegex(err, r"received \d photos \(\d+%\)")
+
+    def test_saved_count_wins_over_the_callers_estimate(self):
+        self.write(self.plib.TIMELINE_COUNT, "2\n")
+        _, err = self.run_timeline(expected=400)
+        self.assertIn("(100%)", err)                     # 3 or 4 of 2, not of 400
+
+    def test_a_failed_read_keeps_the_saved_count(self):
+        self.write(self.plib.TIMELINE_COUNT, "7\n")
+        r, _ = self.run_timeline(details=False)          # the fake fails without -d
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(read(self.plib.TIMELINE_COUNT).strip(), "7")
+
+    def test_an_unreadable_count_is_ignored(self):
+        self.write(self.plib.TIMELINE_COUNT, "lots\n")
+        _, err = self.run_timeline(expected=4)
+        self.assertRegex(err, r"\(\d+%\)")
+
     def test_timeout_kills_the_cli(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             self.run_timeline(timeout=0.1)
