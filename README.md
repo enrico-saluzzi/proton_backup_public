@@ -54,10 +54,10 @@ single command and does everything it needs by itself.
 
 ### Files (Proton Drive)
 
-| I want to... | Script |
+| Script | What it does |
 |---|---|
-| back up my Drive files to a local disk | [`file-backup.py`](#monthly-backup) |
-| check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | [`drive-compare.py`](#migrating-from-another-cloud-eg-dropbox) |
+| [`file-backup.py`](#monthly-backup) | backs up the Drive files to a local disk |
+| [`drive-compare.py`](#migrating-from-another-cloud-eg-dropbox) | checks that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copies over what's missing |
 
 Both start by scanning Proton Drive through the CLI: path, size, date and **sha1** of every file. The CLI lists one folder per call, three calls in parallel: count about a second per folder, so **half an hour or more** for a Drive with a few thousand folders. 
 
@@ -70,12 +70,12 @@ Both read their choices from a **profile** in `config.ini`, like every other scr
 
 ### Photos (Proton Photos)
 
-| I want to... | Script |
+| Script | What it does |
 |---|---|
-| back up my Photos, in year folders and albums | [`photo-backup.py`](#monthly-backup-1) |
-| check that a local photo folder (e.g. Camera Uploads) is all in Photos, and upload what's missing | [`photo-compare.py`](#migrating-from-another-cloud-eg-camera-uploads) |
-| delete photos by browsing the backup, then trash them on Proton too | [`photo-prune.py`](#pruning-photos) |
-| fix the date of scanned prints that sit in the wrong year | [`photo-redate.py`](#fixing-dates-of-scanned-photos), then `--apply` |
+| [`photo-backup.py`](#monthly-backup-1) | backs up Photos, in year folders and albums |
+| [`photo-compare.py`](#migrating-from-another-cloud-eg-camera-uploads) | checks that a local photo folder (e.g. Camera Uploads) is all in Photos, and writes a script to upload what's missing |
+| [`photo-prune.py`](#pruning-photos) | trashes on Proton the photos you deleted from the backup while browsing it |
+| [`photo-redate.py`](#fixing-dates-of-scanned-photos), then `--apply` | fixes the date of scanned prints that sit in the wrong year |
 
 The photo scripts use profiles too, in the same file: `[photo-backup ssd]`
 (the backup folder, the albums) and `[photo-compare camera]` (the folder to
@@ -208,11 +208,8 @@ B=/Volumes/MyBackupDisk
 
 #### Monthly backup
 
-Once, describe the backup disk as a profile:
-
-```bash
-./file-backup.py --setup ssd
-```
+> **First run:** `./file-backup.py --setup ssd` asks where the backup goes and
+> writes the `[file-backup ssd]` profile to `config.ini` (or write the profile by hand: see [Config.ini](#configini)).
 
 Then, every month:
 
@@ -252,16 +249,13 @@ the backup matches what Proton *declares* to hold.
 
 #### Migrating from another cloud (e.g. Dropbox)
 
+> **First run:** `./drive-compare.py --setup dropbox` asks for the folder to
+> check and writes the `[drive-compare dropbox]` profile to `config.ini`
+> (or write the profile by hand: see [Config.ini](#configini)).
+
 Before deleting the old copy, check that nothing in it is missing on Drive
 (for the camera folder, see *Photos* below). The same check works later on any
 copy of your files, e.g. on a disk.
-
-Describe the folder once, as a profile (`[drive-compare dropbox]` in the
-configuration file):
-
-```bash
-./drive-compare.py --setup dropbox
-```
 
 Then compare whenever you want:
 
@@ -334,12 +328,9 @@ scanned top-level folders exist in the chosen folder.
 
 #### Monthly backup
 
-Once, describe the backup as a profile: the photo folder, whether to build
-the albums, and where:
-
-```bash
-./photo-backup.py --setup ssd
-```
+> **First run:** `./photo-backup.py --setup ssd` asks for the photo folder,
+> whether to build the albums, and where, and writes the `[photo-backup ssd]`
+> profile to `config.ini` (or write the profile by hand: see [Config.ini](#configini)).
 
 Then, every month:
 
@@ -389,13 +380,16 @@ chronological order, and `proton-albums/<album>/` organized like on Proton.
 
 #### Migrating from another cloud (e.g. Camera Uploads)
 
+> **First run:** `./photo-compare.py --setup camera` asks for the folder, the
+> time zone and whether to write the upload script, and writes the
+> `[photo-compare camera]` profile to `config.ini` (or write the profile by hand: see [Config.ini](#configini)).
+
 Typical case: a Dropbox `Camera Uploads` folder, while the same phone also
 synced its photos to Proton Photos. Exclude that folder from `drive-compare.py`
 and check it against the Photos section instead:
 
 ```bash
-./photo-compare.py --setup camera    # once: the folder, time zone, upload script
-./photo-compare.py
+./photo-compare.py camera    # or just ./photo-compare.py with a single profile
 ```
 
 (or, without a profile, `./photo-compare.py ~/Dropbox/"Camera Uploads" --upload-script`)
@@ -424,6 +418,10 @@ the profile, or `--tz`, to change it).
   like the Drive scan.
 
 #### Putting photos in an album
+
+> **First run:** `./photo-compare.py --setup wedding` asks for the folder and,
+> with the upload script, the album, and writes the `[photo-compare wedding]`
+> profile to `config.ini` (or write it by hand, as below).
 
 Photos received from someone else, to go into an album, some of them maybe
 already in the library: `album` in the profile (or `--album`) puts every photo
@@ -458,6 +456,11 @@ Setting `album` also writes the upload script.
 
 #### Pruning photos
 
+> **First run:** there's no `--setup`: it works on the backup of the
+> `photo-backup` profile with the same name, so set that one up first
+> ([Monthly backup](#monthly-backup-1)). An optional `[photo-prune ssd]`
+> section in `config.ini` only sets the timeout.
+
 Delete the photos you don't want **from the backup, in Finder**, looking at
 them (the macOS Trash is your safety net). Then:
 
@@ -472,12 +475,16 @@ monthly photo backup again. Proton's trash has no expiry.
 
 #### Fixing dates of scanned photos
 
+> **First run:** `./photo-redate.py --setup ssd` asks which albums to leave
+> alone (`exclude_file`) and writes the `[photo-redate ssd]` profile to
+> `config.ini` (or write the profile by hand: see [Config.ini](#configini)). It works on the backup of the
+> `photo-backup` profile with the same name.
+
 Prints scanned years later have a capture date that is technically right but
 semantically wrong: a 2003 event shows up in 2019. If your albums are named
 starting with the year (`2003 - Holiday in Rome`), the albums know better:
 
 ```bash
-./photo-redate.py --setup ssd        # once: albums to leave alone (exclude_file)
 ./photo-redate.py                    # plan only
 ./photo-redate.py --apply --limit 5  # try a few
 ./photo-redate.py --apply
