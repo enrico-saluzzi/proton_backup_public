@@ -446,19 +446,24 @@ album = 2026 - Wedding
 ```
 
 ```bash
-./photo-compare.py wedding   # writes the script: review it, run it
-./photo-compare.py wedding   # again: a script adding the photos just uploaded
+./photo-compare.py wedding   # writes the script: review it, then run it
 ```
 
-1. The first script creates the album if it doesn't exist, uploads the
-   missing photos and adds to the album the ones already on Proton.
-2. The CLI doesn't say which uid an upload got, so the photos just uploaded
-   are found by the comparison run again: its script adds them to the album.
-3. A third run says "Every local photo is on Proton, and in the album."
+The script, in one run:
 
-Photos already in the album are left alone, and the album is matched by its
-exact name: two albums with that name stop the comparison. Setting `album`
-also writes the upload script.
+1. creates the album if it doesn't exist;
+2. uploads the missing photos;
+3. adds to the album the photos already on Proton;
+4. runs `photo-compare.py --finish-album`: the CLI doesn't say which uid an
+   upload got, so it reads the timeline again, finds the photos just
+   uploaded by content and adds them. A photo Proton hasn't indexed yet is
+   looked for again a few times, 30 seconds apart; any still missing are
+   listed, with the command to run later.
+
+Running the comparison again then says "Every local photo is on Proton, and
+in the album." Photos already in the album are left alone, and the album is
+matched by its exact name: two albums with that name stop the comparison.
+Setting `album` also writes the upload script.
 
 #### Pruning photos
 
