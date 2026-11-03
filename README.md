@@ -74,6 +74,18 @@ on Proton since. The two scripts share the scan, so only one can scan a given
 folder at a time: the second one stops and says to wait and then use
 `--reuse-scan`.
 
+While it works, every script shows the same progress line, redrawn in place:
+a bar and a percentage when the total is known, then what it's doing.
+
+```
+  [...............     ]  76%  scanning Proton: 310 folders, 4120 files, 0 errors | 402s | queued: 12
+```
+
+A Drive scan and a photo timeline read can't know their total in advance:
+they use what the last complete one found, so the bar stops at 99% until the
+read ends, then shows 100% on the real total. The very first one shows only
+the counts.
+
 Both read their choices from a **profile** in `config.ini`, like every other
 script: see [Config.ini](#configini).
 
@@ -508,7 +520,7 @@ plan you reviewed, and is resumable.
 | File | Written by | Used by |
 |---|---|---|
 | `~/.config/proton-backup/config.ini` (the profiles) | `--setup` of any script, or you | all scripts |
-| `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan` |
+| `~/drive-sync-logs/<root>.tsv` (the last complete Drive scan; `.partial`, `.state`, `.queue` while a scan is under way or interrupted) | `file-backup.py`, `drive-compare.py` | the same, with `--reuse-scan`; the next scan, for its percentage |
 | `.proton-photo-inventory.json`, `.proton-photo-state.txt` | `photo-backup.py` | all photo scripts |
 | `.proton-photo-map.json` (uid → local file) | `photo-backup.py` | `photo-prune.py`, `photo-redate.py` |
 | `.proton-albums.json` | `photo-backup.py --albums` | `photo-prune.py`, `photo-redate.py` |

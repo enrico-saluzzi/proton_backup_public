@@ -327,8 +327,7 @@ def read_albums(a):
         uid = alb.get("uid")
         name = (alb.get("name") or {}).get("value") or f"album-{uid[-8:] if uid else i}"
         expected = (alb.get("album") or {}).get("photoCount", 0)
-        sys.stderr.write(f"\r  {i}/{len(listed)}  {name[:44]:<44}")
-        sys.stderr.flush()
+        protonlib.status(f"{i}/{len(listed)}  {name[:44]}", i - 1, len(listed))
         try:
             r = protonlib.run_cli(a.cli, ["album", "photos", "-j", f"/albums/{uid}"], a.timeout)
             photos = json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else []
@@ -342,7 +341,7 @@ def read_albums(a):
         if err or (expected and len(uids) != expected):
             sys.stderr.write(f"\n    WARNING: {name}: expected {expected}, read {len(uids)}"
                              f"{' - ' + err if err else ''}\n")
-    sys.stderr.write("\r" + " " * 70 + "\r")
+    protonlib.status_end(keep=False)
     print(f"  {len(albums)} albums read ({int(time.time() - t0)}s)")
     if not a.dry_run:
         protonlib.write_json(path, albums, ensure_ascii=False, indent=1)
@@ -374,10 +373,9 @@ def hash_files(paths, label):
         if h:
             hashes[p] = h
         if i % 250 == 0 or i == len(paths):
-            sys.stderr.write(f"\r  {label}: {i}/{len(paths)} files | {int(time.time() - t0)}s   ")
-            sys.stderr.flush()
-    if paths:
-        sys.stderr.write("\n")
+            protonlib.status(f"{label}: {i}/{len(paths)} files | {int(time.time() - t0)}s",
+                             i, len(paths))
+    protonlib.status_end()
     return hashes
 
 
@@ -575,10 +573,9 @@ def download(a, todo, total, expected_sha):
             el = int(time.time() - t0)
             rate = downloaded / el if el else 0
             left = int((total - downloaded) / rate) if rate > 0 else 0
-            sys.stderr.write(f"\r  {year}: {downloaded}/{total} photos | {el}s | "
-                             f"about {left // 60} min left    ")
-            sys.stderr.flush()
-    sys.stderr.write("\n")
+            protonlib.status(f"{year}: {downloaded}/{total} photos | {el}s | "
+                             f"about {left // 60} min left", downloaded + len(failed), total)
+    protonlib.status_end()
     return downloaded, failed
 
 

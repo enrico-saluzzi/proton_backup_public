@@ -472,10 +472,9 @@ def match(a, files, by_sha, by_sec, info):
             used.add(uid)
             f["match"], f["proton"] = "content", uid
         if i % 100 == 0 or i == len(on_disk):
-            sys.stderr.write(f"\r  sha1: {i}/{len(on_disk)} files | {int(time.time() - t0)}s   ")
-            sys.stderr.flush()
-    if on_disk:
-        sys.stderr.write("\n")
+            protonlib.status(f"sha1: {i}/{len(on_disk)} files | {int(time.time() - t0)}s",
+                             i, len(on_disk))
+    protonlib.status_end()
 
     # 2. capture time: from the Dropbox-style name, else from EXIF
     rest = [f for f in files if not f["match"]]
