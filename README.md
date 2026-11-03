@@ -59,35 +59,12 @@ single command and does everything it needs by itself.
 | back up my Drive files to a local disk | `file-backup.py` (set up once with `--setup`) |
 | check that a folder (e.g. Dropbox, or a copy on a disk) is all on Drive, and copy over what's missing | `drive-compare.py` (set up once with `--setup`) |
 
-Both start by scanning Proton Drive through the CLI: path, size, date and
-**sha1** of every file. The CLI lists one folder per call, three calls in
-parallel: count about a second per folder, so **half an hour or more** for a
-Drive with a few thousand folders. `--root` picks the
-remote folder (default `/my-files`, the whole Drive). The scan is saved in
-`~/drive-sync-logs`: if it's interrupted or some folder can't be read, the
-command stops, and running it again resumes the scan; `--reuse-scan` skips it
-and uses the last complete one. A new scan replaces the last complete one
-only when it completes, so stopping it never loses the previous scan. When the
-last complete scan is less than an hour old, the script says so and waits 10
-seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed
-on Proton since. The two scripts share the scan, so only one can scan a given
-folder at a time: the second one stops and says to wait and then use
+Both start by scanning Proton Drive through the CLI: path, size, date and **sha1** of every file. The CLI lists one folder per call, three calls in parallel: count about a second per folder, so **half an hour or more** for a Drive with a few thousand folders. 
+<br>`--root` picks the remote folder (default `/my-files`, the whole Drive). The scan is saved in `~/drive-sync-logs`: if it's interrupted or some folder can't be read, the command stops, and running it again resumes the scan; `--reuse-scan` skips it and uses the last complete one. 
+<br>A new scan replaces the last complete one only when it completes, so stopping it never loses the previous scan. When the last complete scan is less than an hour old, the script says so and waits 10 seconds before scanning again: Ctrl-C, then `--reuse-scan`, if nothing changed on Proton since. The two scripts share the scan, so only one can scan a given folder at a time: the second one stops and says to wait and then use
 `--reuse-scan`.
 
-While it works, every script shows the same progress line, redrawn in place:
-a bar and a percentage when the total is known, then what it's doing.
-
-```
-  [...............     ]  76%  scanning Proton: 310 folders, 4120 files, 0 errors | 402s | queued: 12
-```
-
-A Drive scan and a photo timeline read can't know their total in advance:
-they use what the last complete one found, so the bar stops at 99% until the
-read ends, then shows 100% on the real total. The very first one shows only
-the counts.
-
-Both read their choices from a **profile** in `config.ini`, like every other
-script: see [Config.ini](#configini).
+Both read their choices from a **profile** in `config.ini`, like every other script: see [Config.ini](#configini).
 
 ### Photos (Proton Photos)
 
