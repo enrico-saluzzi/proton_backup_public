@@ -56,6 +56,19 @@ UPLOAD SCRIPT
   this comparison again. Online-only files must be made available offline
   first: the script skips files that are empty when it runs.
 
+ALBUM
+  With album = NAME (--album NAME) the folder's photos also go into that
+  album, created by the script if it doesn't exist. The CLI doesn't say
+  which uid an upload got, so it takes two rounds:
+    1. the script creates the album if needed, uploads the missing photos
+       and adds to the album the photos already on Proton;
+    2. the comparison run again finds the photos just uploaded and writes a
+       script that adds them too.
+  Photos already in the album are left alone (the timeline says which album
+  each photo is in), so a third run has nothing to do. Photos matched by
+  capture time are added too: they're the same shot. Setting an album also
+  writes the upload script.
+
 PROFILES
   The folder and the options can live in a profile, in the same
   configuration file as the other scripts: ~/.config/proton-backup/config.ini
@@ -71,10 +84,11 @@ USAGE
   ./photo-compare.py ~/Dropbox/"Camera Uploads"
   ./photo-compare.py ~/Dropbox/"Camera Uploads" ~/Pictures/Phone --upload-script
   ./photo-compare.py camera --reuse-scan
+  ./photo-compare.py ~/Downloads/Wedding --album "2026 - Wedding"
 
 SAFETY
-  Read-only. Doesn't upload, modify or delete anything: the upload script is
-  only written, never run. Online-only files are never read (that would
+  Read-only. Doesn't upload, modify or delete anything, and doesn't create
+  or change albums: the upload script is only written, never run. Online-only files are never read (that would
   download them).
 """
 
@@ -139,6 +153,9 @@ def parse_args():
                    help="also write a script that uploads the missing photos to Proton")
     g.add_argument("--batch", type=int,
                    help="photos per upload command in the upload script (default 20)")
+    g.add_argument("--album",
+                   help="also put the photos in this album, created if missing "
+                        "(writes the upload script)")
     p.add_argument("--reuse-scan", action="store_true",
                    help="reuse the Proton timeline saved last time "
                         "(~/drive-sync-logs/proton-photo-timeline.json) instead of reading it")
@@ -161,7 +178,7 @@ def parse_args():
 
 def resolve_settings(a):
     """Settings for this run, copied onto `a` (a.folders, a.tz, a.tzinfo,
-    a.tolerance, a.no_exif, a.upload_script, a.batch, a.label)."""
+    a.tolerance, a.no_exif, a.upload_script, a.batch, a.album, a.label)."""
     cfg = protonlib.read_config(a.config)
     name = None
     if len(a.targets) <= 1:
@@ -175,7 +192,8 @@ def resolve_settings(a):
         if not s["folder"]:
             sys.exit(f"ERROR: {where} has no folder. Run: ./{SCRIPT}.py --setup {name}")
         folders = [s["folder"]]
-    for k in ("tz", "tolerance", "exif", "upload_script", "batch"):
+    a.album_option = a.album is not None      # given here, not in the profile
+    for k in ("tz", "tolerance", "exif", "upload_script", "batch", "album"):
         v = getattr(a, k)
         if v is not None:
             s[k] = str(v)
@@ -193,7 +211,10 @@ def resolve_settings(a):
     a.tz = s["tz"] or None
     a.tolerance, a.batch = s["tolerance"], s["batch"]
     a.no_exif = s["exif"] == "no"
-    a.upload_script = s["upload_script"] == "yes"
+    a.album = s["album"].strip()
+    if "/" in a.album:
+        sys.exit(f"ERROR: album = {a.album!r} ({where}): an album name can't contain '/'")
+    a.upload_script = s["upload_script"] == "yes" or bool(a.album)
     if not a.label:
         a.label = name or os.path.basename(a.folders[0].rstrip(os.sep)) or "photos"
     a.label = re.sub(r"[^A-Za-z0-9._-]+", "_", a.label).strip("_") or "photos"
@@ -233,6 +254,15 @@ def setup_questions(cur):
             continue
         new[k] = ask(k, cur[k], protonlib.SETTING_CHOICES.get(k),
                      protonlib.SETTING_MINIMUM.get(k))
+    new["album"] = ""
+    if new["upload_script"] == "yes":
+        print("")
+        print(f"  {HELP['album']}")
+        v = ask("album", cur["album"] or "none")
+        while "/" in v:
+            print("    an album name can't contain '/'")
+            v = ask("album", cur["album"] or "none")
+        new["album"] = "" if v == "none" else v
     return new
 
 
@@ -500,6 +530,51 @@ def match(a, files, by_sha, by_sec, info):
                        else "no Proton photo at that time")
 
 
+# --- album -------------------------------------------------------------------
+
+def plan_album(a, timeline, files):
+    """(album path for the CLI, whether the script creates it, the uids to
+    add, how many are already in it) for the photos found on Proton."""
+    r = protonlib.run_cli(a.cli, ["album", "list", "-j"], 300)
+    if r.returncode != 0:
+        sys.exit(f"ERROR from 'album list': {(r.stderr or r.stdout)[:300]}")
+    try:
+        listed = json.loads(r.stdout or "[]")
+    except json.JSONDecodeError as e:
+        sys.exit(f"ERROR: 'album list' didn't return valid JSON: {e}")
+    same = [x.get("uid") for x in listed
+            if ((x.get("name") or {}).get("value") or "") == a.album and x.get("uid")]
+    if len(same) > 1:
+        sys.exit(f"ERROR: {len(same)} albums on Proton are called {a.album!r}: "
+                 "rename one, or choose another album name.")
+    found = {f["proton"] for f in files if f["match"] in ("content", "time")}
+    if not same:
+        return f"/albums/{a.album}", True, sorted(found), 0
+    members = {x.get("uid") or x.get("nodeUid") for x in timeline
+               if same[0] in {al.get("nodeUid")
+                              for al in (x.get("photo") or {}).get("albums") or []}}
+    return (f"/albums/{same[0]}", False, sorted(found - members),
+            len(found & members))
+
+
+# ALBUM UID...: add photos already on Proton to the album, in one CLI call
+_ALBUM_FUNCTION = """
+added=0
+add_to_album() {
+    album="$1"; shift
+    photos=()
+    for u in "$@"; do photos+=("/photos/$u"); done
+    echo "  adding ${#photos[@]} photo(s) to the album"
+    if "$CLI" album add-photo "$album" "${photos[@]}" < /dev/null; then
+        added=$((added + ${#photos[@]}))
+    else
+        echo "  FAILED: adding to the album"
+        failed=$((failed + ${#photos[@]}))
+    fi
+}
+"""
+
+
 # --- main --------------------------------------------------------------------
 
 def main():
@@ -607,36 +682,76 @@ def main():
         for p in written:
             print("   " + p)
 
+    album_path, create, to_add, already = None, False, [], 0
+    if a.album:
+        album_path, create, to_add, already = plan_album(a, timeline, files)
+        print("")
+        print(f"  Album \"{a.album}\": "
+              + ("not on Proton yet, the script creates it" if create
+                 else f"{already} of these photos already in it"))
+        print(f"    to add, already on Proton: {len(to_add)}")
+        if missing:
+            print(f"    to add after the upload: {len(missing)} (on the next comparison)")
+
     if a.upload_script:
         print("")
-        if not missing:
-            print("  Upload script: nothing to upload.")
+        if not missing and not to_add:
+            print("  Upload script: nothing to upload"
+                  + (" or add to the album." if a.album else "."))
         else:
             paths = sorted(f["path"] for f in missing)
             calls = [["My Photos"] + paths[i:i + a.batch]
                      for i in range(0, len(paths), a.batch)]
+            header = [f"Generated by photo-compare.py on {protonlib.generated_on()}.",
+                      f"Uploads to Proton Photos the {len(missing)} photos and videos",
+                      "found locally but not on Proton, with `photo upload -c rename`."]
+            functions = ""
+            if a.album:
+                header += ["", f"Album \"{a.album}\": "
+                           + ("created first, then " if create else "")
+                           + f"{len(to_add)} photos already on Proton are added to it.",
+                           "The photos uploaded here are added by the next comparison:",
+                           "the CLI doesn't say which uid each upload got."]
+                functions = _ALBUM_FUNCTION
+                # run twice, the script must not create a second album
+                pre = ([f'"$CLI" album photos {shlex.quote(album_path)} < /dev/null '
+                        f'> /dev/null 2>&1 || "$CLI" album create {shlex.quote(a.album)} '
+                        '< /dev/null || { echo "  FAILED: creating the album"; exit 1; }']
+                       if create else [])
+                post = [f"add_to_album {shlex.quote(album_path)} "
+                        + " ".join(shlex.quote(u) for u in to_add[i:i + a.batch])
+                        for i in range(0, len(to_add), a.batch)]
+                if post:
+                    post.append(f'echo "  Added to the album: $added"')
+                calls = pre + calls + post
             folders = (shlex.quote(a.profile) if a.profile
                        else " ".join(shlex.quote(d) for d in a.folders))
             path = os.path.join(a.out_dir, f"photos-upload-{a.label}-{stamp}.sh")
             protonlib.write_upload_script(
-                path, a.cli,
-                header=[f"Generated by photo-compare.py on {protonlib.generated_on()}.",
-                        f"Uploads to Proton Photos the {len(missing)} photos and videos",
-                        "found locally but not on Proton, with `photo upload -c rename`."],
+                path, a.cli, header=header,
                 upload_cmd='"$CLI" photo upload -c rename "${files[@]}"',
                 calls=calls,
-                verify=[f"./photo-compare.py {folders}"])
+                verify=[f"./photo-compare.py {folders}"
+                        + (f" --album {shlex.quote(a.album)}"
+                           if a.album and a.album_option else "")],
+                functions=functions)
             print(f"  Upload script: {path}")
             print(f"    {len(missing)} photos and videos to upload.")
+            if a.album:
+                print(f"    {len(to_add)} photos to add to the album"
+                      + (", created first." if create else "."))
             if missing_offline:
                 print(f"    {missing_offline} of them are online-only: make the folder")
                 print("    available offline first, or they'll be skipped.")
-            print("    Review it, run it, then run this comparison again.")
+            print("    Review it, run it, then run this comparison again"
+                  + (": it adds the photos just uploaded to the album." if a.album and missing
+                     else "."))
 
     print("")
     if not missing and not unknown:
-        print("  Every local photo is on Proton.")
-        return 0
+        print("  Every local photo is on Proton"
+              + (", and in the album." if a.album and not to_add else "."))
+        return 1 if to_add else 0
     print("  Some photos are missing on Proton, or couldn't be checked: see above.")
     return 1
 

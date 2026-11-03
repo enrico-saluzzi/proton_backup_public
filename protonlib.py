@@ -743,6 +743,10 @@ PROFILE_SETTINGS = {
          "yes = also write a script that uploads the missing photos"),
         ("batch", "20",
          "photos per upload command in the upload script"),
+        ("album", "",
+         "album for these photos, created if missing: the upload script also adds "
+         "the ones already on Proton, the next comparison the ones just uploaded "
+         "(empty = none; setting it also writes the upload script)"),
     ],
     "photo-prune": [
         ("timeout", "120",

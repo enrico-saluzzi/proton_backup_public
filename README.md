@@ -198,6 +198,7 @@ no `--setup`: its one setting, `timeout`, is edited by hand.
 | | `tolerance` (`1`) | seconds of tolerance on capture times |
 | | `exif` (`yes`) | read the date with `exiftool` when the file name has none |
 | | `upload_script` (`no`), `batch` (`20`) | `yes`: also write a script uploading the missing photos, `batch` per command |
+| | `album` | the photos also go into this album, created if missing: see [Putting photos in an album](#putting-photos-in-an-album) |
 | `[photo-prune <name>]` | `timeout` (`120`) | seconds per CLI call; the backup comes from `[photo-backup <name>]` |
 | `[photo-redate <name>]` | `exclude`, `exclude_file` | albums to leave alone: comma-separated, or one per line in a file |
 | | `wait` (`20`), `timeout` (`600`) | with `--apply`: seconds before looking for the re-uploaded photos; seconds per call |
@@ -430,6 +431,34 @@ the profile, or `--tz`, to change it).
 - The Proton timeline is saved in `~/drive-sync-logs/proton-photo-timeline.json`;
   `--reuse-scan` reuses it instead of reading it again while you iterate,
   like the Drive scan.
+
+#### Putting photos in an album
+
+Photos received from someone else, to go into an album, some of them maybe
+already in the library: `album` in the profile (or `--album`) puts every photo
+of the folder in that album, the ones uploaded and the ones already there.
+
+```ini
+[photo-compare wedding]
+folder = ~/Downloads/Wedding photos
+upload_script = yes
+album = 2026 - Wedding
+```
+
+```bash
+./photo-compare.py wedding   # writes the script: review it, run it
+./photo-compare.py wedding   # again: a script adding the photos just uploaded
+```
+
+1. The first script creates the album if it doesn't exist, uploads the
+   missing photos and adds to the album the ones already on Proton.
+2. The CLI doesn't say which uid an upload got, so the photos just uploaded
+   are found by the comparison run again: its script adds them to the album.
+3. A third run says "Every local photo is on Proton, and in the album."
+
+Photos already in the album are left alone, and the album is matched by its
+exact name: two albums with that name stop the comparison. Setting `album`
+also writes the upload script.
 
 #### Pruning photos
 
