@@ -12,6 +12,9 @@ a ~36,000-photo library onto an external SSD.
 - Python 3 standard library only: nothing to `pip install`.
 - Every long-running script is **interruptible and resumable**.
 - Everything that deletes or trashes on Proton is **dry-run by default**.
+- Written and tested on **macOS** only. On Linux or Windows, try them on a
+  copy first: local paths, disk locations and the generated upload scripts
+  (bash) may need some thought there.
 
 > Independent project, not affiliated with or endorsed by Proton AG.
 
