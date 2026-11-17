@@ -1,5 +1,7 @@
 # proton_backup_public
 
+[![Tests](https://github.com/enrico-saluzzi/proton_backup_public/actions/workflows/tests.yml/badge.svg)](https://github.com/enrico-saluzzi/proton_backup_public/actions/workflows/tests.yml)
+
 Scripts to back up, verify and maintain a **Proton Drive** library (files *and*
 Photos) from the command line, built around the official `proton-drive` CLI.
 
@@ -594,6 +596,10 @@ python3 -m unittest discover -s tests -v
 
 Standard library only. The tests run against temporary folders and a fake
 `proton-drive`: they never touch your files or your Proton account.
+
+GitHub Actions runs them on macOS, with Python 3.9 and the latest release, on
+every push to `main` and every pull request
+([`tests.yml`](.github/workflows/tests.yml)).
 
 ---
 
